@@ -24,3 +24,93 @@
 &wdt31 {
 	status = "okay";
 };
+
+&pinctrl {
+	i2c21_default: i2c21_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 11)>,
+				<NRF_PSEL(TWIM_SCL, 1, 13)>;
+			bias-pull-up;
+		};
+	};
+
+	i2c21_sleep: i2c21_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 11)>,
+				<NRF_PSEL(TWIM_SCL, 1, 13)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c21 {
+	status = "okay";
+	pinctrl-0 = <&i2c21_default>;
+	pinctrl-1 = <&i2c21_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	scd41: scd41@62 {
+		compatible = "i2c-device";
+		reg = <0x62>;
+	};
+};
+
+/ {
+	zephyr,user {
+		io-channels = <&adc 0>;
+	};
+};
+
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,vref-mv = <900>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_VDD>;
+		zephyr,resolution = <12>;
+	};
+};
+
+/* Console/shell stays on UART20 (P1.04-P1.07), no override needed. */
+
+/* LED1 (P1.10) and LED3 (P1.14) are sacrificed for the LCD RS and D7 lines. */
+/delete-node/ &led1;
+/delete-node/ &led3;
+
+/* PWM20 also drives P1.10 (PWM_OUT0) - disable it and its LED so RS is free. */
+/delete-node/ &pwm_led1;
+
+&pwm20 {
+	status = "disabled";
+};
+
+/ {
+	aliases {
+		/delete-property/ led1;
+		/delete-property/ led3;
+		/delete-property/ pwm-led0;
+	};
+
+	auxdisplay: auxdisplay {
+		compatible = "hit,hd44780";
+		status = "okay";
+		columns = <16>;
+		rows = <2>;
+		mode = <4>;
+
+		register-select-gpios = <&gpio1 10 GPIO_ACTIVE_HIGH>;  /* RS (was LED1) */
+		enable-gpios = <&gpio1 12 GPIO_ACTIVE_HIGH>;           /* E  */
+
+		/* 4-bit mode: first four entries must be <0>, then D4..D7 */
+		data-bus-gpios = <0>, <0>, <0>, <0>,
+				 <&gpio2 6 GPIO_ACTIVE_HIGH>,          /* D4 */
+				 <&gpio2 8 GPIO_ACTIVE_HIGH>,          /* D5 */
+				 <&gpio2 10 GPIO_ACTIVE_HIGH>,         /* D6 */
+				 <&gpio1 14 GPIO_ACTIVE_HIGH>;         /* D7 (was LED3) */
+	};
+};

@@ -5,6 +5,7 @@
  */
 
 #include "temperature_manager.h"
+#include "display_manager.h"
 #include <app-common/zap-generated/cluster-objects.h>
 #include <platform/PlatformManager.h>
 #include <zephyr/logging/log.h>
@@ -112,6 +113,7 @@ void TemperatureManager::AttributeChangeHandler(EndpointId endpointId, Attribute
 	case OccupiedHeatingSetpoint::Id: {
 		mHeatingCelsiusSetPoint = *reinterpret_cast<int16_t *>(value);
 		LOG_INF("Heating TEMP %d", mHeatingCelsiusSetPoint);
+		DisplayManager::Instance().ShowSetpointTemporarily();
 	} break;
 
 	case SystemMode::Id: {

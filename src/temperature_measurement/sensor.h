@@ -8,8 +8,10 @@
 #include "binding/binding_handler.h"
 
 #include <platform/CHIPDeviceLayer.h>
+#include <zephyr/kernel.h>
 
 using namespace ::Nrf::Matter;
+
 class TemperatureSensor {
 public:
 	TemperatureSensor();
@@ -29,7 +31,14 @@ private:
 							      chip::OperationalDeviceProxy *deviceProxy,
 							      BindingHandler::BindingData &bindingData);
 
+	/* SCD41 single-shot read runs in its own thread so the 5s blocking
+	 * measurement never stalls the CHIP task. */
+	static void Scd41ThreadEntry(void *, void *, void *);
+
 	int16_t mPreviousTemperature;
 	uint8_t mMockTempIndex;
 	uint8_t mCycleCounter;
+
+	k_thread mScd41Thread;
+	k_thread_stack_t *mScd41ThreadStack;
 };

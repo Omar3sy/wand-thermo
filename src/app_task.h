@@ -29,4 +29,5 @@ private:
 
 	static void ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChanged);
 	static void ThermostatHandler(const TemperatureButtonAction &action);
+	static void AdjustSetpoint(int16_t delta);
 };

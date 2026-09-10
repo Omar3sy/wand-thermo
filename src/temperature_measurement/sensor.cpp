@@ -5,14 +5,18 @@
  */
 
 #include "sensor.h"
+#include "scd41.h"
 #include "temp_sensor_manager.h"
+
+#include "app/task_executor.h"
+#include "display_manager.h"
 
 #include <stdint.h>
 
-#include <temp_sensor_manager.h>
-
+#include <app-common/zap-generated/attributes/Accessors.h>
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <controller/ReadInteraction.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/logging/log.h>
 
 using namespace ::chip;
@@ -25,13 +29,15 @@ namespace
 {
 
 constexpr chip::EndpointId mTemperatureMeasurementEndpointId = 1;
-constexpr int16_t startingMockedValue = 1600;
+/* RelativeHumidityMeasurement server was added to the root endpoint in the ZAP. */
+constexpr chip::EndpointId kHumidityMeasurementEndpointId = 0;
 
-constexpr uint16_t kSimulatedReadingFrequency = (60000 / kSensorTimerPeriodMs); /*Change simulated number every minute*/
+constexpr uint8_t kScd41I2cAddr = 0x62;
+/* The scd41 node has no dedicated Zephyr driver, so bind to its I2C bus
+ * controller directly and address the device by its 7-bit address. */
+static const struct device *sScd41I2cDev = DEVICE_DT_GET(DT_BUS(DT_NODELABEL(scd41)));
 
-#if CONFIG_THERMOSTAT_TEMPERATURE_STEP == 0
-constexpr int16_t sMockTemp[] = { 2000, 2731, 1600, 2100, 1937, 3011, 1500, 1899 };
-#endif
+K_THREAD_STACK_DEFINE(sScd41ThreadStack, 2048);
 
 } /* namespace */
 
@@ -39,7 +45,8 @@ TemperatureSensor::TemperatureSensor()
 {
 	mCycleCounter = 0;
 	mMockTempIndex = 0;
-	mPreviousTemperature = startingMockedValue;
+	mPreviousTemperature = 0;
+	mScd41ThreadStack = sScd41ThreadStack;
 	BindingHandler::Init();
 }
 
@@ -51,36 +58,68 @@ void TemperatureSensor::FullMeasurement()
 
 void TemperatureSensor::InternalMeasurement()
 {
-	int16_t temperature;
-#if CONFIG_THERMOSTAT_TEMPERATURE_STEP == 0
+	/* Kick off the blocking SCD41 single-shot read in a dedicated thread
+	 * so we never block the caller (CHIP task via Nrf::PostTask). */
+	k_thread_create(&mScd41Thread, mScd41ThreadStack, K_THREAD_STACK_SIZEOF(sScd41ThreadStack),
+			TemperatureSensor::Scd41ThreadEntry, nullptr, nullptr, nullptr,
+			K_PRIO_PREEMPT(10), 0, K_NO_WAIT);
+	k_thread_name_set(&mScd41Thread, "scd41_read");
+}
 
-	temperature = sMockTemp[mMockTempIndex];
+void TemperatureSensor::Scd41ThreadEntry(void *, void *, void *)
+{
+	uint16_t co2;
+	int32_t temp_millideg_c;
+	uint16_t humidity_milli_percent;
+	int16_t matterTemp = 0;
+	uint16_t matterHumidity = 0;
+	bool valid = false;
 
-	mCycleCounter++;
-	if (mCycleCounter >= kSimulatedReadingFrequency) {
-		if (mMockTempIndex >= MATTER_ARRAY_SIZE(sMockTemp) - 1) {
-			mMockTempIndex = 0;
-		} else {
-			mMockTempIndex++;
-		}
-		mCycleCounter = 0;
+	if (!device_is_ready(sScd41I2cDev)) {
+		LOG_ERR("SCD41 I2C device not ready");
+		return;
 	}
-#else
-	int16_t nextValue = mPreviousTemperature + CONFIG_THERMOSTAT_TEMPERATURE_STEP;
-#if CONFIG_THERMOSTAT_TEMPERATURE_STEP > 0
-	temperature = (nextValue >= CONFIG_THERMOSTAT_SIMULATED_TEMPERATURE_MAX) ?
-			      CONFIG_THERMOSTAT_SIMULATED_TEMPERATURE_MIN :
-			      nextValue;
-#elif CONFIG_THERMOSTAT_TEMPERATURE_STEP < 0
-	temperature = (nextValue <= CONFIG_THERMOSTAT_SIMULATED_TEMPERATURE_MIN) ?
-			      CONFIG_THERMOSTAT_SIMULATED_TEMPERATURE_MAX :
-			      nextValue;
-#endif
-#endif
 
-	mPreviousTemperature = temperature;
+	scd41_wake_up(sScd41I2cDev, kScd41I2cAddr);
 
-	TempSensorManager::Instance().SetLocalTemperature(temperature);
+	int ret = scd41_measure_single_shot(sScd41I2cDev, kScd41I2cAddr);
+	if (ret == 0) {
+		ret = scd41_read_measurement(sScd41I2cDev, kScd41I2cAddr, &co2, &temp_millideg_c,
+					      &humidity_milli_percent);
+	}
+
+	scd41_power_down(sScd41I2cDev, kScd41I2cAddr);
+
+	if (ret == 0) {
+		/* Matter LocalTemperature is in units of 0.01 degC */
+		matterTemp = static_cast<int16_t>(temp_millideg_c / 10);
+		/* Matter RelativeHumidityMeasurement MeasuredValue is in units of 0.01 % */
+		matterHumidity = static_cast<uint16_t>(humidity_milli_percent / 10);
+		valid = true;
+		LOG_INF("SCD41: CO2=%u ppm, Temp=%d.%02u degC, RH=%u.%02u%%", co2,
+			(int)(temp_millideg_c / 1000), (unsigned)(abs(temp_millideg_c) % 1000) / 10,
+			humidity_milli_percent / 1000, (humidity_milli_percent % 1000) / 10);
+	} else {
+		LOG_ERR("SCD41 measurement failed: %d", ret);
+	}
+
+	if (valid) {
+		TempSensorManager::Instance().SetLocalTemperature(matterTemp);
+
+		PlatformMgr().LockChipStack();
+		Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Set(kHumidityMeasurementEndpointId,
+										    matterHumidity);
+		PlatformMgr().UnlockChipStack();
+
+		Nrf::PostTask([matterTemp] { DisplayManager::Instance().UpdateLocalTemperature(matterTemp); });
+		Nrf::PostTask([matterHumidity] { DisplayManager::Instance().UpdateHumidity(matterHumidity); });
+	} else {
+		TempSensorManager::Instance().ClearLocalTemperature();
+
+		PlatformMgr().LockChipStack();
+		Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::SetNull(kHumidityMeasurementEndpointId);
+		PlatformMgr().UnlockChipStack();
+	}
 }
 
 void TemperatureSensor::ExternalMeasurement()
