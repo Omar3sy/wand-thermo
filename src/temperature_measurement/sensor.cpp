@@ -16,6 +16,7 @@
 #include <app-common/zap-generated/attributes/Accessors.h>
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <controller/ReadInteraction.h>
+#include <controller/WriteInteraction.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/logging/log.h>
 
@@ -29,8 +30,9 @@ namespace
 {
 
 constexpr chip::EndpointId mTemperatureMeasurementEndpointId = 1;
-/* RelativeHumidityMeasurement server was added to the root endpoint in the ZAP. */
-constexpr chip::EndpointId kHumidityMeasurementEndpointId = 0;
+/* Endpoint 2 = dedicated "Humidity Sensor" (0x0307) device type in the ZAP,
+ * carrying the RelativeHumidityMeasurement server cluster. */
+constexpr chip::EndpointId kHumidityMeasurementEndpointId = 2;
 
 constexpr uint8_t kScd41I2cAddr = 0x62;
 /* The scd41 node has no dedicated Zephyr driver, so bind to its I2C bus
@@ -161,4 +163,39 @@ void TemperatureSensor::ExternalTemperatureMeasurementReadHandler(
 	Controller::ReadAttribute<Clusters::TemperatureMeasurement::Attributes::MeasuredValue::TypeInfo>(
 		deviceProxy->GetExchangeManager(), deviceProxy->GetSecureSession().Value(), binding.remote, onSuccess,
 		onFailure);
+}
+
+int16_t TemperatureSensor::sPendingSetpointValue = 0;
+
+void TemperatureSensor::ExternalSetpointWrite(int16_t heatingSetpoint)
+{
+	sPendingSetpointValue = heatingSetpoint;
+
+	Nrf::Matter::BindingHandler::BindingData *data = Platform::New<Nrf::Matter::BindingHandler::BindingData>();
+	if (data) {
+		data->ClusterId = Clusters::Thermostat::Id;
+		data->EndpointId = mTemperatureMeasurementEndpointId;
+		data->InvokeCommandFunc = ExternalSetpointWriteHandler;
+		BindingHandler::RunBoundClusterAction(data);
+	}
+}
+
+void TemperatureSensor::ExternalSetpointWriteHandler(
+	const chip::app::Clusters::Binding::TableEntry &binding, OperationalDeviceProxy *deviceProxy,
+	Nrf::Matter::BindingHandler::BindingData &bindingData)
+{
+	auto onSuccess = [dataPointer = Platform::New<Nrf::Matter::BindingHandler::BindingData>(bindingData)](
+				 const ConcreteAttributePath &attributePath) {
+		ChipLogProgress(NotSpecified, "Write OccupiedHeatingSetpoint succeeded");
+		BindingHandler::OnInvokeCommandSucces(dataPointer);
+	};
+
+	auto onFailure = [](const ConcreteAttributePath *attributePath, CHIP_ERROR error) {
+		ChipLogError(NotSpecified, "Write OccupiedHeatingSetpoint failed: %" CHIP_ERROR_FORMAT, error.Format());
+	};
+
+	VerifyOrReturn(deviceProxy != nullptr && deviceProxy->ConnectionReady(), LOG_ERR("Device invalid"));
+
+	Controller::WriteAttribute<Clusters::Thermostat::Attributes::OccupiedHeatingSetpoint::TypeInfo>(
+		deviceProxy->GetSecureSession().Value(), binding.remote, sPendingSetpointValue, onSuccess, onFailure);
 }

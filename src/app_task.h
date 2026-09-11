@@ -9,6 +9,7 @@
 #include "board/board.h"
 
 #include <platform/CHIPDeviceLayer.h>
+#include <zephyr/kernel.h>
 
 struct Identify;
 
@@ -30,4 +31,9 @@ private:
 	static void ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChanged);
 	static void ThermostatHandler(const TemperatureButtonAction &action);
 	static void AdjustSetpoint(int16_t delta);
+
+	static void BindingHoldTimerHandler(k_timer *timer);
+	static void EnterBindingReadyMode();
+	static void BindingReadyBlinkHandler(k_timer *timer);
+	static void StopBindingReadyBlink(k_timer *timer);
 };

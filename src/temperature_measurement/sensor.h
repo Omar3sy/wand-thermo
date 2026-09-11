@@ -25,11 +25,18 @@ public:
 	void FullMeasurement();
 	void ExternalMeasurement();
 	void InternalMeasurement();
+	void ExternalSetpointWrite(int16_t heatingSetpoint);
 
 private:
 	static void ExternalTemperatureMeasurementReadHandler(const chip::app::Clusters::Binding::TableEntry &binding,
 							      chip::OperationalDeviceProxy *deviceProxy,
 							      BindingHandler::BindingData &bindingData);
+
+	static void ExternalSetpointWriteHandler(const chip::app::Clusters::Binding::TableEntry &binding,
+						chip::OperationalDeviceProxy *deviceProxy,
+						BindingHandler::BindingData &bindingData);
+
+	static int16_t sPendingSetpointValue;
 
 	/* SCD41 single-shot read runs in its own thread so the 5s blocking
 	 * measurement never stalls the CHIP task. */

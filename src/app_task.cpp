@@ -19,6 +19,7 @@
 #include <app-common/zap-generated/attributes/Accessors.h>
 #include <setup_payload/OnboardingCodesUtil.h>
 
+#include <dk_buttons_and_leds.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_DECLARE(app, CONFIG_MATTER_LOG_LEVEL);
@@ -41,13 +42,31 @@ Nrf::Matter::IdentifyCluster sIdentifyCluster(kThermostatEndpointId);
 constexpr int16_t kSetpointStep = 50;   /* 0.5 °C step, Matter units are centi-degrees */
 constexpr int16_t kSetpointMin = 700;   /* 7.0 °C */
 constexpr int16_t kSetpointMax = 3000;  /* 30.0 °C */
+
+constexpr uint32_t kBindingHoldTimeMs = 15000;
+constexpr uint32_t kBindingBlinkIntervalMs = 150;
+constexpr uint32_t kBindingBlinkDurationMs = 2000;
+
+k_timer sBindingHoldTimer;
+k_timer sBindingReadyBlinkTimer;
+k_timer sBindingReadyStopTimer;
+bool sBindingModePending = false;
+bool sBindingBlinkState = false;
 } /* namespace */
 
 void AppTask::ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChanged)
 {
 	if (BINDING_BUTTON_MASK & hasChanged) {
 		if (BINDING_BUTTON_MASK & state) {
-			Nrf::PostTask([] { TemperatureSensor::Instance().ExternalMeasurement(); });
+			k_timer_start(&sBindingHoldTimer, K_MSEC(kBindingHoldTimeMs), K_NO_WAIT);
+		} else {
+			k_timer_stop(&sBindingHoldTimer);
+
+			if (!sBindingModePending) {
+				Nrf::PostTask([] { TemperatureSensor::Instance().ExternalMeasurement(); });
+			} else {
+				sBindingModePending = false;
+			}
 		}
 	}
 
@@ -75,6 +94,32 @@ void AppTask::ThermostatHandler(const TemperatureButtonAction &action)
 	if (action == TemperatureButtonAction::Pushed) {
 		TemperatureManager::Instance().LogThermostatStatus();
 	}
+}
+
+void AppTask::BindingHoldTimerHandler(k_timer *timer)
+{
+	Nrf::PostTask([] { AppTask::EnterBindingReadyMode(); });
+}
+
+void AppTask::EnterBindingReadyMode()
+{
+	LOG_INF("Binding-ready mode activated (button held 15s)");
+	sBindingModePending = true;
+
+	k_timer_start(&sBindingReadyBlinkTimer, K_MSEC(kBindingBlinkIntervalMs), K_MSEC(kBindingBlinkIntervalMs));
+	k_timer_start(&sBindingReadyStopTimer, K_MSEC(kBindingBlinkDurationMs), K_NO_WAIT);
+}
+
+void AppTask::BindingReadyBlinkHandler(k_timer *timer)
+{
+	sBindingBlinkState = !sBindingBlinkState;
+	dk_set_led(DK_LED2, sBindingBlinkState);
+}
+
+void AppTask::StopBindingReadyBlink(k_timer *timer)
+{
+	k_timer_stop(&sBindingReadyBlinkTimer);
+	dk_set_led(DK_LED2, 0);
 }
 
 void AppTask::AdjustSetpoint(int16_t delta)
@@ -130,6 +175,10 @@ CHIP_ERROR AppTask::Init()
 		}
 		return err;
 	} }));
+
+	k_timer_init(&sBindingHoldTimer, AppTask::BindingHoldTimerHandler, nullptr);
+	k_timer_init(&sBindingReadyBlinkTimer, AppTask::BindingReadyBlinkHandler, nullptr);
+	k_timer_init(&sBindingReadyStopTimer, AppTask::StopBindingReadyBlink, nullptr);
 
 	if (!Nrf::GetBoard().Init(ButtonEventHandler)) {
 		LOG_ERR("User interface initialization failed.");
