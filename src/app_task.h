@@ -36,4 +36,8 @@ private:
 	static void EnterBindingReadyMode();
 	static void BindingReadyBlinkHandler(k_timer *timer);
 	static void StopBindingReadyBlink(k_timer *timer);
+
+	static void SystemModeButtonHandler();
+	static int64_t sLastButton0PressTime;
+	static bool sSystemModeIsHeating;
 };

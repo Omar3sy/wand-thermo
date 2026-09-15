@@ -26,6 +26,12 @@ public:
 	void ExternalMeasurement();
 	void InternalMeasurement();
 	void ExternalSetpointWrite(int16_t heatingSetpoint);
+	void ExternalSystemModeWrite(uint8_t mode);
+
+	/* Periodic poll of the bound TRV: mirrors its OccupiedHeatingSetpoint
+	 * into our local setpoint, and reads PIHeatingDemand for display only. */
+	void PollTrvSetpoint();
+	void PollTrvHeatingDemand();
 
 private:
 	static void ExternalTemperatureMeasurementReadHandler(const chip::app::Clusters::Binding::TableEntry &binding,
@@ -36,7 +42,20 @@ private:
 						chip::OperationalDeviceProxy *deviceProxy,
 						BindingHandler::BindingData &bindingData);
 
+	static void TrvSetpointReadHandler(const chip::app::Clusters::Binding::TableEntry &binding,
+					   chip::OperationalDeviceProxy *deviceProxy,
+					   BindingHandler::BindingData &bindingData);
+
+	static void TrvHeatingDemandReadHandler(const chip::app::Clusters::Binding::TableEntry &binding,
+						chip::OperationalDeviceProxy *deviceProxy,
+						BindingHandler::BindingData &bindingData);
+
+	static void ExternalSystemModeWriteHandler(const chip::app::Clusters::Binding::TableEntry &binding,
+						   chip::OperationalDeviceProxy *deviceProxy,
+						   BindingHandler::BindingData &bindingData);
+
 	static int16_t sPendingSetpointValue;
+	static uint8_t sPendingSystemModeValue;
 
 	/* SCD41 single-shot read runs in its own thread so the 5s blocking
 	 * measurement never stalls the CHIP task. */

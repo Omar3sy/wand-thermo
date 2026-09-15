@@ -7,6 +7,7 @@
 #include "sensor.h"
 #include "scd41.h"
 #include "temp_sensor_manager.h"
+#include "temperature_manager.h"
 
 #include "app/task_executor.h"
 #include "display_manager.h"
@@ -56,6 +57,8 @@ void TemperatureSensor::FullMeasurement()
 {
 	InternalMeasurement();
 	ExternalMeasurement();
+	PollTrvSetpoint();
+	PollTrvHeatingDemand();
 }
 
 void TemperatureSensor::InternalMeasurement()
@@ -198,4 +201,119 @@ void TemperatureSensor::ExternalSetpointWriteHandler(
 
 	Controller::WriteAttribute<Clusters::Thermostat::Attributes::OccupiedHeatingSetpoint::TypeInfo>(
 		deviceProxy->GetSecureSession().Value(), binding.remote, sPendingSetpointValue, onSuccess, onFailure);
+}
+
+uint8_t TemperatureSensor::sPendingSystemModeValue = 0;
+
+void TemperatureSensor::ExternalSystemModeWrite(uint8_t mode)
+{
+	sPendingSystemModeValue = mode;
+
+	Nrf::Matter::BindingHandler::BindingData *data = Platform::New<Nrf::Matter::BindingHandler::BindingData>();
+	if (data) {
+		data->ClusterId = Clusters::Thermostat::Id;
+		data->EndpointId = mTemperatureMeasurementEndpointId;
+		data->InvokeCommandFunc = ExternalSystemModeWriteHandler;
+		BindingHandler::RunBoundClusterAction(data);
+	}
+}
+
+void TemperatureSensor::ExternalSystemModeWriteHandler(
+	const chip::app::Clusters::Binding::TableEntry &binding, OperationalDeviceProxy *deviceProxy,
+	Nrf::Matter::BindingHandler::BindingData &bindingData)
+{
+	auto onSuccess = [dataPointer = Platform::New<Nrf::Matter::BindingHandler::BindingData>(bindingData)](
+				 const ConcreteAttributePath &attributePath) {
+		ChipLogProgress(NotSpecified, "Write SystemMode succeeded");
+		BindingHandler::OnInvokeCommandSucces(dataPointer);
+	};
+
+	auto onFailure = [](const ConcreteAttributePath *attributePath, CHIP_ERROR error) {
+		ChipLogError(NotSpecified, "Write SystemMode failed: %" CHIP_ERROR_FORMAT, error.Format());
+	};
+
+	VerifyOrReturn(deviceProxy != nullptr && deviceProxy->ConnectionReady(), LOG_ERR("Device invalid"));
+
+	Controller::WriteAttribute<Clusters::Thermostat::Attributes::SystemMode::TypeInfo>(
+		deviceProxy->GetSecureSession().Value(), binding.remote,
+		static_cast<Clusters::Thermostat::SystemModeEnum>(sPendingSystemModeValue), onSuccess, onFailure);
+}
+
+void TemperatureSensor::PollTrvSetpoint()
+{
+	Nrf::Matter::BindingHandler::BindingData *data = Platform::New<Nrf::Matter::BindingHandler::BindingData>();
+	if (data) {
+		data->ClusterId = Clusters::Thermostat::Id;
+		data->EndpointId = mTemperatureMeasurementEndpointId;
+		data->InvokeCommandFunc = TrvSetpointReadHandler;
+		BindingHandler::RunBoundClusterAction(data);
+	}
+}
+
+void TemperatureSensor::TrvSetpointReadHandler(
+	const chip::app::Clusters::Binding::TableEntry &binding, OperationalDeviceProxy *deviceProxy,
+	Nrf::Matter::BindingHandler::BindingData &bindingData)
+{
+	/* Note: unlike TemperatureMeasurement::MeasuredValue, Thermostat::OccupiedHeatingSetpoint
+	 * is a plain (non-nullable) int16_t - dataResponse below is the value itself. */
+	auto onSuccess = [dataPointer = Platform::New<Nrf::Matter::BindingHandler::BindingData>(bindingData)](
+				 const ConcreteDataAttributePath &attributePath, int16_t dataResponse) {
+		ChipLogProgress(NotSpecified, "Read TRV OccupiedHeatingSetpoint succeeded");
+
+		PlatformMgr().LockChipStack();
+		TemperatureManager::Instance().SetApplyingRemoteUpdate(true);
+		Clusters::Thermostat::Attributes::OccupiedHeatingSetpoint::Set(mTemperatureMeasurementEndpointId,
+										dataResponse);
+		TemperatureManager::Instance().SetApplyingRemoteUpdate(false);
+		PlatformMgr().UnlockChipStack();
+
+		BindingHandler::OnInvokeCommandSucces(dataPointer);
+	};
+
+	auto onFailure = [](const ConcreteDataAttributePath *attributePath, CHIP_ERROR error) {
+		ChipLogError(NotSpecified, "Read TRV setpoint failed: %" CHIP_ERROR_FORMAT, error.Format());
+	};
+
+	VerifyOrReturn(deviceProxy != nullptr && deviceProxy->ConnectionReady(), LOG_ERR("Device invalid"));
+
+	Controller::ReadAttribute<Clusters::Thermostat::Attributes::OccupiedHeatingSetpoint::TypeInfo>(
+		deviceProxy->GetExchangeManager(), deviceProxy->GetSecureSession().Value(), binding.remote, onSuccess,
+		onFailure);
+}
+
+void TemperatureSensor::PollTrvHeatingDemand()
+{
+	Nrf::Matter::BindingHandler::BindingData *data = Platform::New<Nrf::Matter::BindingHandler::BindingData>();
+	if (data) {
+		data->ClusterId = Clusters::Thermostat::Id;
+		data->EndpointId = mTemperatureMeasurementEndpointId;
+		data->InvokeCommandFunc = TrvHeatingDemandReadHandler;
+		BindingHandler::RunBoundClusterAction(data);
+	}
+}
+
+void TemperatureSensor::TrvHeatingDemandReadHandler(
+	const chip::app::Clusters::Binding::TableEntry &binding, OperationalDeviceProxy *deviceProxy,
+	Nrf::Matter::BindingHandler::BindingData &bindingData)
+{
+	/* PIHeatingDemand is also a plain (non-nullable) uint8_t percentage. */
+	auto onSuccess = [dataPointer = Platform::New<Nrf::Matter::BindingHandler::BindingData>(bindingData)](
+				 const ConcreteDataAttributePath &attributePath, uint8_t dataResponse) {
+		ChipLogProgress(NotSpecified, "Read TRV PIHeatingDemand succeeded");
+		LOG_INF("TRV Heating Demand: %u%%", dataResponse);
+
+		Nrf::PostTask([dataResponse] { DisplayManager::Instance().UpdateHeatingDemand(dataResponse); });
+
+		BindingHandler::OnInvokeCommandSucces(dataPointer);
+	};
+
+	auto onFailure = [](const ConcreteDataAttributePath *attributePath, CHIP_ERROR error) {
+		ChipLogError(NotSpecified, "Read TRV heating demand failed: %" CHIP_ERROR_FORMAT, error.Format());
+	};
+
+	VerifyOrReturn(deviceProxy != nullptr && deviceProxy->ConnectionReady(), LOG_ERR("Device invalid"));
+
+	Controller::ReadAttribute<Clusters::Thermostat::Attributes::PIHeatingDemand::TypeInfo>(
+		deviceProxy->GetExchangeManager(), deviceProxy->GetSecureSession().Value(), binding.remote, onSuccess,
+		onFailure);
 }

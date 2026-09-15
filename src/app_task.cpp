@@ -38,6 +38,9 @@ Nrf::Matter::IdentifyCluster sIdentifyCluster(kThermostatEndpointId);
 #define BINDING_BUTTON_MASK DK_BTN2_MSK
 #define MINUS_BUTTON_MASK DK_BTN3_MSK
 #define PLUS_BUTTON_MASK DK_BTN4_MSK
+#define SYSTEM_MODE_BUTTON_MASK DK_BTN1_MSK
+
+constexpr int64_t kDoublePressWindowMs = 600;
 
 constexpr int16_t kSetpointStep = 50;   /* 0.5 °C step, Matter units are centi-degrees */
 constexpr int16_t kSetpointMin = 700;   /* 7.0 °C */
@@ -54,8 +57,23 @@ bool sBindingModePending = false;
 bool sBindingBlinkState = false;
 } /* namespace */
 
+int64_t AppTask::sLastButton0PressTime = 0;
+bool AppTask::sSystemModeIsHeating = true;
+
 void AppTask::ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChanged)
 {
+	if (SYSTEM_MODE_BUTTON_MASK & hasChanged) {
+		if (SYSTEM_MODE_BUTTON_MASK & state) {
+			int64_t now = k_uptime_get();
+			if (now - sLastButton0PressTime < kDoublePressWindowMs) {
+				Nrf::PostTask([] { AppTask::SystemModeButtonHandler(); });
+				sLastButton0PressTime = 0;
+			} else {
+				sLastButton0PressTime = now;
+			}
+		}
+	}
+
 	if (BINDING_BUTTON_MASK & hasChanged) {
 		if (BINDING_BUTTON_MASK & state) {
 			k_timer_start(&sBindingHoldTimer, K_MSEC(kBindingHoldTimeMs), K_NO_WAIT);
@@ -72,19 +90,23 @@ void AppTask::ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChan
 
 	if (MINUS_BUTTON_MASK & hasChanged) {
 		if (MINUS_BUTTON_MASK & state) {
-			Nrf::PostTask([] {
-				AppTask::AdjustSetpoint(-kSetpointStep);
-				DisplayManager::Instance().ShowSetpointTemporarily();
-			});
+			if (sSystemModeIsHeating) { /* ignore setpoint changes while Off */
+				Nrf::PostTask([] {
+					AppTask::AdjustSetpoint(-kSetpointStep);
+					DisplayManager::Instance().ShowSetpointTemporarily();
+				});
+			}
 		}
 	}
 
 	if (PLUS_BUTTON_MASK & hasChanged) {
 		if (PLUS_BUTTON_MASK & state) {
-			Nrf::PostTask([] {
-				AppTask::AdjustSetpoint(kSetpointStep);
-				DisplayManager::Instance().ShowSetpointTemporarily();
-			});
+			if (sSystemModeIsHeating) { /* ignore setpoint changes while Off */
+				Nrf::PostTask([] {
+					AppTask::AdjustSetpoint(kSetpointStep);
+					DisplayManager::Instance().ShowSetpointTemporarily();
+				});
+			}
 		}
 	}
 }
@@ -120,6 +142,24 @@ void AppTask::StopBindingReadyBlink(k_timer *timer)
 {
 	k_timer_stop(&sBindingReadyBlinkTimer);
 	dk_set_led(DK_LED2, 0);
+}
+
+void AppTask::SystemModeButtonHandler()
+{
+	using namespace chip::app::Clusters::Thermostat::Attributes;
+	using chip::app::Clusters::Thermostat::SystemModeEnum;
+
+	sSystemModeIsHeating = !sSystemModeIsHeating;
+	SystemModeEnum newMode = sSystemModeIsHeating ? SystemModeEnum::kHeat : SystemModeEnum::kOff;
+
+	PlatformMgr().LockChipStack();
+	SystemMode::Set(kThermostatEndpointId, newMode);
+	PlatformMgr().UnlockChipStack();
+
+	DisplayManager::Instance().SetSystemModeIsHeating(sSystemModeIsHeating);
+	DisplayManager::Instance().ShowModeTemporarily(sSystemModeIsHeating);
+
+	LOG_INF("System mode toggled to: %s", sSystemModeIsHeating ? "Heating" : "Off");
 }
 
 void AppTask::AdjustSetpoint(int16_t delta)

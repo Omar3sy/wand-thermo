@@ -7,8 +7,10 @@
 #include "temperature_manager.h"
 #include "display_manager.h"
 #include "temperature_measurement/sensor.h"
+#include "app/task_executor.h"
 #include <app-common/zap-generated/cluster-objects.h>
 #include <platform/PlatformManager.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_DECLARE(app, CONFIG_CHIP_APP_LOG_LEVEL);
@@ -39,6 +41,21 @@ uint8_t ReturnRemainderValue(int16_t Value)
 	return static_cast<uint8_t>((Value % 100 + 5) / 10);
 }
 
+/* Debounces OccupiedHeatingSetpoint binding writes: rapid successive setpoint
+ * changes (e.g. holding the +/- button) would otherwise start a new
+ * ExternalSetpointWrite() while a previous binding write/CASE session is
+ * still in flight, overlapping sessions and leaving stale ones behind.
+ * Only the last value within the debounce window is written. */
+constexpr uint32_t kSetpointWriteDebounceMs = 800;
+
+k_timer sSetpointWriteDebounceTimer;
+int16_t sLastPendingSetpointValue = 0;
+
+void SetpointWriteDebounceHandler(k_timer *timer)
+{
+	Nrf::PostTask([] { TemperatureSensor::Instance().ExternalSetpointWrite(sLastPendingSetpointValue); });
+}
+
 } /* namespace */
 
 CHIP_ERROR TemperatureManager::Init()
@@ -60,6 +77,8 @@ CHIP_ERROR TemperatureManager::Init()
 
 exit:
 	PlatformMgr().UnlockChipStack();
+
+	k_timer_init(&sSetpointWriteDebounceTimer, SetpointWriteDebounceHandler, nullptr);
 
 	return err;
 }
@@ -115,11 +134,20 @@ void TemperatureManager::AttributeChangeHandler(EndpointId endpointId, Attribute
 		mHeatingCelsiusSetPoint = *reinterpret_cast<int16_t *>(value);
 		LOG_INF("Heating TEMP %d", mHeatingCelsiusSetPoint);
 		DisplayManager::Instance().ShowSetpointTemporarily();
-		TemperatureSensor::Instance().ExternalSetpointWrite(mHeatingCelsiusSetPoint);
+
+		if (!mApplyingRemoteUpdate) {
+			sLastPendingSetpointValue = mHeatingCelsiusSetPoint;
+			k_timer_start(&sSetpointWriteDebounceTimer, K_MSEC(kSetpointWriteDebounceMs), K_NO_WAIT);
+		}
 	} break;
 
 	case SystemMode::Id: {
 		mThermMode = static_cast<app::Clusters::Thermostat::SystemModeEnum>(*value);
+		LOG_INF("System Mode changed to %u", *value);
+
+		if (!mApplyingRemoteUpdate) {
+			TemperatureSensor::Instance().ExternalSystemModeWrite(*value);
+		}
 	} break;
 
 	default: {
