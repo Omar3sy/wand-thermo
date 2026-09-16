@@ -40,6 +40,16 @@ public:
 		RenderLine2();
 	}
 
+	/* Called by the TRV poll failure/success tracking in sensor.cpp once
+	 * consecutive failures cross the threshold (or a poll succeeds again),
+	 * so the user sees "TRV offline" on the LCD instead of silently stale
+	 * setpoint/heating-demand values. */
+	void SetTrvOffline(bool offline)
+	{
+		mTrvOffline = offline;
+		RenderLine2();
+	}
+
 private:
 	static void SetpointTimeoutHandler(struct k_work *work);
 	static void ModeTimeoutHandler(struct k_work *work);
@@ -59,4 +69,5 @@ private:
 	uint8_t mLastBatteryPercent = 0;
 	uint8_t mLastHeatingDemand = 0;
 	bool mSystemModeIsHeating = true;
+	bool mTrvOffline = false;
 };

@@ -146,7 +146,9 @@ void DisplayManager::RenderLine2()
 {
 	char buf[24];
 
-	if (mSystemModeIsHeating) {
+	if (mTrvOffline) {
+		snprintf(buf, sizeof(buf), "B:%d%% TRV offline", mLastBatteryPercent / 2);
+	} else if (mSystemModeIsHeating) {
 		/* "B:100% D:100%" - battery and TRV heating demand together */
 		snprintf(buf, sizeof(buf), "B:%d%% D:%u%%", mLastBatteryPercent / 2, mLastHeatingDemand);
 	} else {

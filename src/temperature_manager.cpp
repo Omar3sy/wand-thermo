@@ -56,6 +56,19 @@ void SetpointWriteDebounceHandler(k_timer *timer)
 	Nrf::PostTask([] { TemperatureSensor::Instance().ExternalSetpointWrite(sLastPendingSetpointValue); });
 }
 
+/* Same debounce problem/fix as the setpoint above: a fast double-click on the
+ * mode button (or a remote toggle right after a local one) could otherwise
+ * fire two overlapping ExternalSystemModeWrite() binding writes. */
+constexpr uint32_t kSystemModeWriteDebounceMs = 800;
+
+k_timer sSystemModeWriteDebounceTimer;
+uint8_t sLastPendingSystemModeValue = 0;
+
+void SystemModeWriteDebounceHandler(k_timer *timer)
+{
+	Nrf::PostTask([] { TemperatureSensor::Instance().ExternalSystemModeWrite(sLastPendingSystemModeValue); });
+}
+
 } /* namespace */
 
 CHIP_ERROR TemperatureManager::Init()
@@ -79,6 +92,7 @@ exit:
 	PlatformMgr().UnlockChipStack();
 
 	k_timer_init(&sSetpointWriteDebounceTimer, SetpointWriteDebounceHandler, nullptr);
+	k_timer_init(&sSystemModeWriteDebounceTimer, SystemModeWriteDebounceHandler, nullptr);
 
 	return err;
 }
@@ -146,7 +160,8 @@ void TemperatureManager::AttributeChangeHandler(EndpointId endpointId, Attribute
 		LOG_INF("System Mode changed to %u", *value);
 
 		if (!mApplyingRemoteUpdate) {
-			TemperatureSensor::Instance().ExternalSystemModeWrite(*value);
+			sLastPendingSystemModeValue = *value;
+			k_timer_start(&sSystemModeWriteDebounceTimer, K_MSEC(kSystemModeWriteDebounceMs), K_NO_WAIT);
 		}
 	} break;
 
