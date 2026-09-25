@@ -3526,14 +3526,14 @@ endpoint 1 {
     ram      attribute absMinCoolSetpointLimit default = 1600;
     ram      attribute absMaxCoolSetpointLimit default = 3200;
     ram      attribute occupiedCoolingSetpoint default = 2600;
-    ram      attribute occupiedHeatingSetpoint default = 2000;
+    persist  attribute occupiedHeatingSetpoint default = 2000;
     ram      attribute minHeatSetpointLimit default = 700;
     ram      attribute maxHeatSetpointLimit default = 3000;
     ram      attribute minCoolSetpointLimit default = 1600;
     ram      attribute maxCoolSetpointLimit default = 3200;
     ram      attribute minSetpointDeadBand default = 25;
     ram      attribute controlSequenceOfOperation default = 0x04;
-    ram      attribute systemMode default = 0x01;
+    persist  attribute systemMode default = 0x04;
     callback attribute generatedCommandList;
     callback attribute acceptedCommandList;
     callback attribute attributeList;
@@ -3583,5 +3583,3 @@ endpoint 2 {
     ram      attribute clusterRevision default = 3;
   }
 }
-
-

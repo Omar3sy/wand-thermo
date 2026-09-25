@@ -76,12 +76,34 @@ void RecordTrvPollFailure()
 	}
 }
 
+/* An Interaction Model status error (e.g. UnsupportedAccess after an ACL
+ * change) means the TRV did answer - it is reachable, just unhappy with the
+ * request - so only real connectivity errors (timeout, no session) count
+ * towards "TRV offline". */
+void RecordTrvPollError(CHIP_ERROR error)
+{
+	if (error.IsIMStatus()) {
+		RecordTrvPollSuccess();
+		return;
+	}
+	RecordTrvPollFailure();
+}
+
 constexpr uint8_t kScd41I2cAddr = 0x62;
 /* The scd41 node has no dedicated Zephyr driver, so bind to its I2C bus
  * controller directly and address the device by its 7-bit address. */
 static const struct device *sScd41I2cDev = DEVICE_DT_GET(DT_BUS(DT_NODELABEL(scd41)));
 
 K_THREAD_STACK_DEFINE(sScd41ThreadStack, 2048);
+
+/* 1 while the SCD41 measurement thread is alive. Guards against re-creating
+ * mScd41Thread (same thread object and stack) while a previous run has not
+ * finished yet, which would corrupt the still-live kernel thread object. */
+atomic_t sScd41Busy = ATOMIC_INIT(0);
+
+struct Scd41BusyGuard {
+	~Scd41BusyGuard() { atomic_clear(&sScd41Busy); }
+};
 
 } /* namespace */
 
@@ -105,6 +127,11 @@ void TemperatureSensor::FullMeasurement()
 
 void TemperatureSensor::InternalMeasurement()
 {
+	if (!atomic_cas(&sScd41Busy, 0, 1)) {
+		LOG_WRN("SCD41 measurement still running - skipping this cycle");
+		return;
+	}
+
 	/* Kick off the blocking SCD41 single-shot read in a dedicated thread
 	 * so we never block the caller (CHIP task via Nrf::PostTask). */
 	k_thread_create(&mScd41Thread, mScd41ThreadStack, K_THREAD_STACK_SIZEOF(sScd41ThreadStack),
@@ -115,6 +142,8 @@ void TemperatureSensor::InternalMeasurement()
 
 void TemperatureSensor::Scd41ThreadEntry(void *, void *, void *)
 {
+	Scd41BusyGuard busyGuard;
+
 	uint16_t co2;
 	int32_t temp_millideg_c;
 	uint16_t humidity_milli_percent;
@@ -455,7 +484,7 @@ void TemperatureSensor::TrvSetpointReadHandler(
 									CHIP_ERROR error) {
 		ChipLogError(NotSpecified, "Read TRV setpoint failed: %" CHIP_ERROR_FORMAT, error.Format());
 		if (sPrimaryTrvNodeId == 0 || remoteNodeId == sPrimaryTrvNodeId) {
-			RecordTrvPollFailure();
+			RecordTrvPollError(error);
 		}
 		Platform::Delete<Nrf::Matter::BindingHandler::BindingData>(dataPointer);
 	};
@@ -520,7 +549,7 @@ void TemperatureSensor::TrvHeatingDemandReadHandler(
 									CHIP_ERROR error) {
 		ChipLogError(NotSpecified, "Read TRV heating demand failed: %" CHIP_ERROR_FORMAT, error.Format());
 		if (sPrimaryTrvNodeId == 0 || remoteNodeId == sPrimaryTrvNodeId) {
-			RecordTrvPollFailure();
+			RecordTrvPollError(error);
 		}
 		Platform::Delete<Nrf::Matter::BindingHandler::BindingData>(dataPointer);
 	};
@@ -618,7 +647,7 @@ void TemperatureSensor::TrvLocalTemperatureReadHandler(
 									CHIP_ERROR error) {
 		ChipLogError(NotSpecified, "Read TRV LocalTemperature failed: %" CHIP_ERROR_FORMAT, error.Format());
 		if (sPrimaryTrvNodeId == 0 || remoteNodeId == sPrimaryTrvNodeId) {
-			RecordTrvPollFailure();
+			RecordTrvPollError(error);
 		}
 		Platform::Delete<Nrf::Matter::BindingHandler::BindingData>(dataPointer);
 	};

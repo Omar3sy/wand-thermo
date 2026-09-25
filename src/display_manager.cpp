@@ -23,6 +23,22 @@ constexpr k_timeout_t kSetpointDisplayDuration = K_SECONDS(30);
 
 const struct device *sDisplay = DEVICE_DT_GET(DT_NODELABEL(auxdisplay));
 
+/* Custom character slot for the "heating" flame icon. Not slot 0: its character
+ * code would be a NUL byte, which would terminate the C strings we build. */
+constexpr uint8_t kFlameIconIndex = 1;
+
+/* 5x8 pixels, row by row, 0xff = pixel on. */
+uint8_t sFlameIconPixels[40] = {
+	0x00, 0x00, 0xff, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xff, 0x00,
+	0x00, 0xff, 0xff, 0xff, 0x00,
+	0x00, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff,
+	0x00, 0xff, 0xff, 0xff, 0x00,
+	0x00, 0x00, 0xff, 0x00, 0x00,
+};
+
 void WriteLine(uint8_t row, const char *text)
 {
 	if (!device_is_ready(sDisplay)) {
@@ -42,6 +58,15 @@ CHIP_ERROR DisplayManager::Init()
 	if (!device_is_ready(sDisplay)) {
 		LOG_ERR("Auxdisplay device not ready");
 		return CHIP_ERROR_INCORRECT_STATE;
+	}
+
+	struct auxdisplay_character flameIcon = {
+		.index = kFlameIconIndex,
+		.data = sFlameIconPixels,
+		.character_code = 0,
+	};
+	if (auxdisplay_custom_character_set(sDisplay, &flameIcon) != 0) {
+		LOG_WRN("Failed to upload heating icon");
 	}
 
 	k_work_init_delayable(&mSetpointTimeout, DisplayManager::SetpointTimeoutHandler);
@@ -149,8 +174,12 @@ void DisplayManager::RenderLine2()
 	if (mTrvOffline) {
 		snprintf(buf, sizeof(buf), "B:%d%% TRV offline", mLastBatteryPercent / 2);
 	} else if (mSystemModeIsHeating) {
-		/* "B:100% D:100%" - battery and TRV heating demand together */
-		snprintf(buf, sizeof(buf), "B:%d%% D:%u%%", mLastBatteryPercent / 2, mLastHeatingDemand);
+		/* "B:100% [flame]" - battery, plus a flame icon while the TRV is heating */
+		if (mLastHeatingDemand > 0) {
+			snprintf(buf, sizeof(buf), "B:%d%% %c", mLastBatteryPercent / 2, kFlameIconIndex);
+		} else {
+			snprintf(buf, sizeof(buf), "B:%d%%", mLastBatteryPercent / 2);
+		}
 	} else {
 		/* System off: heating-demand percentage is meaningless, show the mode instead */
 		snprintf(buf, sizeof(buf), "B:%d%% Mode OFF", mLastBatteryPercent / 2);
