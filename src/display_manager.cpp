@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include <app-common/zap-generated/attributes/Accessors.h>
 #include <zephyr/device.h>
@@ -19,7 +20,7 @@ LOG_MODULE_DECLARE(app, CONFIG_CHIP_APP_LOG_LEVEL);
 namespace
 {
 constexpr chip::EndpointId kThermostatEndpoint = 1;
-constexpr k_timeout_t kSetpointDisplayDuration = K_SECONDS(30);
+constexpr k_timeout_t kSetpointDisplayDuration = K_SECONDS(15);
 
 const struct device *sDisplay = DEVICE_DT_GET(DT_NODELABEL(auxdisplay));
 
@@ -37,6 +38,22 @@ uint8_t sFlameIconPixels[40] = {
 	0xff, 0xff, 0xff, 0xff, 0xff,
 	0x00, 0xff, 0xff, 0xff, 0x00,
 	0x00, 0x00, 0xff, 0x00, 0x00,
+};
+
+/* Custom character slot for the "linked" check-mark icon, shown while the TRV
+ * subscription is established. */
+constexpr uint8_t kLinkIconIndex = 2;
+
+/* 5x8 check mark, row by row, 0xff = pixel on. */
+uint8_t sLinkIconPixels[40] = {
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0xff,
+	0x00, 0x00, 0x00, 0xff, 0x00,
+	0xff, 0x00, 0xff, 0x00, 0x00,
+	0x00, 0xff, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 void WriteLine(uint8_t row, const char *text)
@@ -67,6 +84,15 @@ CHIP_ERROR DisplayManager::Init()
 	};
 	if (auxdisplay_custom_character_set(sDisplay, &flameIcon) != 0) {
 		LOG_WRN("Failed to upload heating icon");
+	}
+
+	struct auxdisplay_character linkIcon = {
+		.index = kLinkIconIndex,
+		.data = sLinkIconPixels,
+		.character_code = 0,
+	};
+	if (auxdisplay_custom_character_set(sDisplay, &linkIcon) != 0) {
+		LOG_WRN("Failed to upload link icon");
 	}
 
 	k_work_init_delayable(&mSetpointTimeout, DisplayManager::SetpointTimeoutHandler);
@@ -173,16 +199,19 @@ void DisplayManager::RenderLine2()
 
 	if (mTrvOffline) {
 		snprintf(buf, sizeof(buf), "B:%d%% TRV offline", mLastBatteryPercent / 2);
-	} else if (mSystemModeIsHeating) {
-		/* "B:100% [flame]" - battery, plus a flame icon while the TRV is heating */
-		if (mLastHeatingDemand > 0) {
+	} else {
+		if (!mSystemModeIsHeating) {
+			/* System off: heating-demand percentage is meaningless, show the mode instead */
+			snprintf(buf, sizeof(buf), "B:%d%% Mode OFF", mLastBatteryPercent / 2);
+		} else if (mLastHeatingDemand > 0) {
 			snprintf(buf, sizeof(buf), "B:%d%% %c", mLastBatteryPercent / 2, kFlameIconIndex);
 		} else {
 			snprintf(buf, sizeof(buf), "B:%d%%", mLastBatteryPercent / 2);
 		}
-	} else {
-		/* System off: heating-demand percentage is meaningless, show the mode instead */
-		snprintf(buf, sizeof(buf), "B:%d%% Mode OFF", mLastBatteryPercent / 2);
+		if (mTrvLinked) {
+			const size_t len = strlen(buf);
+			snprintf(buf + len, sizeof(buf) - len, " %c", kLinkIconIndex);
+		}
 	}
 
 	WriteLine(1, buf);

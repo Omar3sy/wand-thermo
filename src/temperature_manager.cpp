@@ -149,7 +149,9 @@ void TemperatureManager::AttributeChangeHandler(EndpointId endpointId, Attribute
 		LOG_INF("Heating TEMP %d", mHeatingCelsiusSetPoint);
 		DisplayManager::Instance().ShowSetpointTemporarily();
 
-		if (!mApplyingRemoteUpdate) {
+		if (TemperatureSensor::IsRemoteAppliedSetpoint(mHeatingCelsiusSetPoint)) {
+			k_timer_stop(&sSetpointWriteDebounceTimer);
+		} else {
 			sLastPendingSetpointValue = mHeatingCelsiusSetPoint;
 			k_timer_start(&sSetpointWriteDebounceTimer, K_MSEC(kSetpointWriteDebounceMs), K_NO_WAIT);
 		}

@@ -7,6 +7,7 @@
 
 #include "binding/binding_handler.h"
 
+#include <app/ReadClient.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <zephyr/kernel.h>
 
@@ -34,7 +35,38 @@ public:
 	void PollTrvHeatingDemand();
 	void PollTrvLocalTemperature();
 
+	/* Starts the Matter subscription to the primary TRV once its node is known.
+	 * Idempotent, meant to be called on every measurement cycle. The polls above
+	 * keep running as fallback, also while subscribed. */
+	void EnsureTrvSubscribed();
+
+	/* True if value is the setpoint the TRV already has from its last remote update,
+	 * so a local write of the same value would be redundant. */
+	static bool IsRemoteAppliedSetpoint(int16_t value);
+	/* Called on every local write, so a later local change to the same value is
+	 * never suppressed by a stale remote marker. */
+	static void ClearRemoteAppliedSetpoint();
+
 private:
+	class TrvSubscriptionCallback;
+
+	static void SetRemoteSetpoint(int16_t value);
+	static bool sHasRemoteAppliedSetpoint;
+	static int16_t sRemoteAppliedSetpoint;
+
+	static void SubscribeTrvHandler(const chip::app::Clusters::Binding::TableEntry &binding,
+					chip::OperationalDeviceProxy *deviceProxy,
+					BindingHandler::BindingData &bindingData);
+
+	static chip::app::ReadClient *sTrvReadClient;
+	static TrvSubscriptionCallback sTrvCallback;
+	static bool sTrvSubscribing;
+	static bool sTrvSubscribed;
+	static bool sTrvFallbackToPolling;
+	static int64_t sTrvSubscribeStartMs;
+	static chip::NodeId sTrvSubscribedNodeId;
+
+
 	static void ExternalTemperatureMeasurementReadHandler(const chip::app::Clusters::Binding::TableEntry &binding,
 							      chip::OperationalDeviceProxy *deviceProxy,
 							      BindingHandler::BindingData &bindingData);

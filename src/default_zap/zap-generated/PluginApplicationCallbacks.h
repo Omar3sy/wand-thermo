@@ -37,6 +37,7 @@ void MatterWiFiNetworkDiagnosticsPluginServerInitCallback();
 void MatterAdministratorCommissioningPluginServerInitCallback();
 void MatterOperationalCredentialsPluginServerInitCallback();
 void MatterGroupKeyManagementPluginServerInitCallback();
+void MatterIcdManagementPluginServerInitCallback();
 void MatterThermostatPluginServerInitCallback();
 void MatterRelativeHumidityMeasurementPluginServerInitCallback();
 
@@ -59,5 +60,6 @@ void MatterRelativeHumidityMeasurementPluginServerInitCallback();
   MatterAdministratorCommissioningPluginServerInitCallback();                  \
   MatterOperationalCredentialsPluginServerInitCallback();                      \
   MatterGroupKeyManagementPluginServerInitCallback();                          \
+  MatterIcdManagementPluginServerInitCallback();                               \
   MatterThermostatPluginServerInitCallback();                                  \
   MatterRelativeHumidityMeasurementPluginServerInitCallback();

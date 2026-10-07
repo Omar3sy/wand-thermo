@@ -8,6 +8,7 @@
 #include "app/task_executor.h"
 #include "temperature_measurement/sensor.h"
 
+#include <app-common/zap-generated/attributes/Accessors.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_DECLARE(app, CONFIG_CHIP_APP_LOG_LEVEL);

@@ -18,7 +18,7 @@ public:
 		return sInstance;
 	}
 
-	/* Called from button handlers: shows setpoint for 30s, then falls back */
+	/* Called from button handlers: shows setpoint for 15s, then falls back */
 	void ShowSetpointTemporarily();
 
 	/* Called after a System Mode toggle (Button0 double-click): shows
@@ -50,6 +50,13 @@ public:
 		RenderLine2();
 	}
 
+	/* True while the TRV subscription is established, shown as a check mark on line 2. */
+	void SetTrvLinked(bool linked)
+	{
+		mTrvLinked = linked;
+		RenderLine2();
+	}
+
 private:
 	static void SetpointTimeoutHandler(struct k_work *work);
 	static void ModeTimeoutHandler(struct k_work *work);
@@ -70,4 +77,5 @@ private:
 	uint8_t mLastHeatingDemand = 0;
 	bool mSystemModeIsHeating = true;
 	bool mTrvOffline = false;
+	bool mTrvLinked = false;
 };

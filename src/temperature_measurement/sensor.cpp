@@ -15,11 +15,21 @@
 #include <stdint.h>
 
 #include <app-common/zap-generated/attributes/Accessors.h>
+#include <app-common/zap-generated/cluster-objects.h>
 #include <app-common/zap-generated/ids/Attributes.h>
+#include <app/AttributePathParams.h>
+#include <app/InteractionModelEngine.h>
+#include <app/data-model/Decode.h>
 #include <controller/ReadInteraction.h>
 #include <controller/WriteInteraction.h>
+#include <lib/support/CHIPMem.h>
+#include <protocols/interaction_model/StatusCode.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/logging/log.h>
+
+#include <cinttypes>
+#include <cstdlib>
+#include <new>
 
 using namespace ::chip;
 using namespace ::chip::DeviceLayer;
@@ -56,6 +66,9 @@ constexpr int16_t kMaxTrvOffsetMagnitude = 500; /* +/- 5.0 C */
 constexpr uint8_t kTrvOfflineFailureThreshold = 3;
 uint8_t sTrvConsecutiveFailures = 0;
 
+constexpr uint32_t kStartupGraceMs = 60000;
+int64_t sBootUptimeMs = 0;
+
 void RecordTrvPollSuccess()
 {
 	bool wasOffline = sTrvConsecutiveFailures >= kTrvOfflineFailureThreshold;
@@ -67,6 +80,10 @@ void RecordTrvPollSuccess()
 
 void RecordTrvPollFailure()
 {
+	if (k_uptime_get() - sBootUptimeMs < kStartupGraceMs) {
+		LOG_DBG("TRV poll failure ignored during startup grace period");
+		return;
+	}
 	if (sTrvConsecutiveFailures < UINT8_MAX) {
 		sTrvConsecutiveFailures++;
 	}
@@ -114,6 +131,7 @@ TemperatureSensor::TemperatureSensor()
 	mPreviousTemperature = 0;
 	mScd41ThreadStack = sScd41ThreadStack;
 	BindingHandler::Init();
+	sBootUptimeMs = k_uptime_get();
 }
 
 void TemperatureSensor::FullMeasurement()
@@ -123,6 +141,10 @@ void TemperatureSensor::FullMeasurement()
 	PollTrvSetpoint();
 	PollTrvHeatingDemand();
 	PollTrvLocalTemperature();
+	/* Runs after the polls above, so the primary TRV is usually not known yet on the
+	 * very first cycle: its first answer arrives asynchronously. The subscription
+	 * therefore starts one cycle later (about 30 s), by design. */
+	EnsureTrvSubscribed();
 }
 
 void TemperatureSensor::InternalMeasurement()
@@ -278,6 +300,7 @@ int16_t TemperatureSensor::sLastSentCompensatedSetpoint = INT16_MIN; /* guarante
 void TemperatureSensor::ExternalSetpointWrite(int16_t heatingSetpoint)
 {
 	sPendingSetpointValue = heatingSetpoint;
+	ClearRemoteAppliedSetpoint();
 
 	Nrf::Matter::BindingHandler::BindingData *data = Platform::New<Nrf::Matter::BindingHandler::BindingData>();
 	if (data) {
@@ -458,12 +481,7 @@ void TemperatureSensor::TrvSetpointReadHandler(
 		 * from what we sent. */
 		int32_t diff = abs(static_cast<int32_t>(dataResponse) - static_cast<int32_t>(sLastSentCompensatedSetpoint));
 		if (diff > kSetpointEchoToleranceCentidegrees) {
-			PlatformMgr().LockChipStack();
-			TemperatureManager::Instance().SetApplyingRemoteUpdate(true);
-			Clusters::Thermostat::Attributes::OccupiedHeatingSetpoint::Set(mTemperatureMeasurementEndpointId,
-											dataResponse);
-			TemperatureManager::Instance().SetApplyingRemoteUpdate(false);
-			PlatformMgr().UnlockChipStack();
+			SetRemoteSetpoint(dataResponse);
 
 			/* Without this, sLastSentCompensatedSetpoint stays frozen at whatever
 			 * we last wrote ourselves, so every future poll of this same
@@ -655,4 +673,293 @@ void TemperatureSensor::TrvLocalTemperatureReadHandler(
 	Controller::ReadAttribute<Clusters::Thermostat::Attributes::LocalTemperature::TypeInfo>(
 		deviceProxy->GetExchangeManager(), deviceProxy->GetSecureSession().Value(), binding.remote, onSuccess,
 		onFailure);
+}
+
+bool TemperatureSensor::sHasRemoteAppliedSetpoint = false;
+int16_t TemperatureSensor::sRemoteAppliedSetpoint = 0;
+
+bool TemperatureSensor::IsRemoteAppliedSetpoint(int16_t value)
+{
+	return sHasRemoteAppliedSetpoint && sRemoteAppliedSetpoint == value;
+}
+
+void TemperatureSensor::ClearRemoteAppliedSetpoint()
+{
+	sHasRemoteAppliedSetpoint = false;
+}
+
+void TemperatureSensor::SetRemoteSetpoint(int16_t value)
+{
+	sHasRemoteAppliedSetpoint = true;
+	sRemoteAppliedSetpoint = value;
+
+	PlatformMgr().LockChipStack();
+	const auto status =
+		Clusters::Thermostat::Attributes::OccupiedHeatingSetpoint::Set(mTemperatureMeasurementEndpointId, value);
+	PlatformMgr().UnlockChipStack();
+
+	if (status != chip::Protocols::InteractionModel::Status::Success) {
+		sHasRemoteAppliedSetpoint = false;
+	}
+}
+
+chip::app::ReadClient *TemperatureSensor::sTrvReadClient = nullptr;
+bool TemperatureSensor::sTrvSubscribing = false;
+bool TemperatureSensor::sTrvSubscribed = false;
+bool TemperatureSensor::sTrvFallbackToPolling = false;
+int64_t TemperatureSensor::sTrvSubscribeStartMs = 0;
+chip::NodeId TemperatureSensor::sTrvSubscribedNodeId = chip::kUndefinedNodeId;
+
+namespace
+{
+/* 1 s minimum: the TRV may report on every change, but not faster than this. */
+constexpr uint16_t kTrvSubscriptionMinIntervalSeconds = 1;
+/* 120 s, not 300 s: the TRV expects an external temperature update at least
+ * every 150 s, so a report must arrive within that window. */
+constexpr uint16_t kTrvSubscriptionMaxIntervalSeconds = 120;
+constexpr size_t kTrvSubscriptionAttributeCount = 3;
+constexpr int64_t kTrvSubscribeStallMs = 30000;
+} /* namespace */
+
+class TemperatureSensor::TrvSubscriptionCallback : public chip::app::ReadClient::Callback {
+public:
+	void OnAttributeData(const chip::app::ConcreteDataAttributePath &aPath, chip::TLV::TLVReader *apData,
+			     const chip::app::StatusIB &aStatus) override
+	{
+		if (aStatus.IsFailure() || apData == nullptr) {
+			return;
+		}
+
+		using namespace chip::app::Clusters::Thermostat::Attributes;
+
+		switch (aPath.mAttributeId) {
+		case OccupiedHeatingSetpoint::Id: {
+			OccupiedHeatingSetpoint::TypeInfo::DecodableType value;
+			if (chip::app::DataModel::Decode(*apData, value) != CHIP_NO_ERROR) {
+				return;
+			}
+			ApplyRemoteSetpoint(value);
+		} break;
+
+		case PIHeatingDemand::Id: {
+			PIHeatingDemand::TypeInfo::DecodableType value;
+			if (chip::app::DataModel::Decode(*apData, value) != CHIP_NO_ERROR) {
+				return;
+			}
+			LOG_INF("TRV Heating Demand: %u%%", value);
+			Nrf::PostTask([value] { DisplayManager::Instance().UpdateHeatingDemand(value); });
+		} break;
+
+		case LocalTemperature::Id: {
+			LocalTemperature::TypeInfo::DecodableType value;
+			if (chip::app::DataModel::Decode(*apData, value) != CHIP_NO_ERROR || value.IsNull()) {
+				return;
+			}
+			ApplyRemoteLocalTemperature(value.Value());
+		} break;
+
+		default:
+			return;
+		}
+
+		RecordTrvPollSuccess();
+	}
+
+	void OnSubscriptionEstablished(chip::SubscriptionId aSubscriptionId) override
+	{
+		sTrvSubscribing = false;
+		sTrvSubscribed = true;
+		Nrf::PostTask([] { DisplayManager::Instance().SetTrvLinked(true); });
+		LOG_INF("TRV subscription established (id 0x%" PRIx32 ") for node 0x%llX",
+			static_cast<uint32_t>(aSubscriptionId), (unsigned long long)sTrvSubscribedNodeId);
+	}
+
+	CHIP_ERROR OnResubscriptionNeeded(chip::app::ReadClient *apReadClient, CHIP_ERROR aTerminationCause) override
+	{
+		sTrvSubscribing = false;
+		sTrvSubscribed = false;
+		Nrf::PostTask([] { DisplayManager::Instance().SetTrvLinked(false); });
+
+		if (aTerminationCause.IsIMStatus()) {
+			const uint8_t code = aTerminationCause.GetSdkCode();
+			if (code == static_cast<uint8_t>(chip::Protocols::InteractionModel::Status::ResourceExhausted) ||
+			    code == static_cast<uint8_t>(chip::Protocols::InteractionModel::Status::PathsExhausted)) {
+				sTrvFallbackToPolling = true;
+				LOG_WRN("TRV has no subscription resources left - staying on polling");
+				return aTerminationCause;
+			}
+		}
+
+		LOG_INF("TRV subscription lost (%" CHIP_ERROR_FORMAT ") - resubscribing, polling meanwhile",
+			aTerminationCause.Format());
+		return apReadClient->DefaultResubscribePolicy(aTerminationCause);
+	}
+
+	void OnError(CHIP_ERROR aError) override
+	{
+		sTrvSubscribing = false;
+		sTrvSubscribed = false;
+		Nrf::PostTask([] { DisplayManager::Instance().SetTrvLinked(false); });
+		LOG_WRN("TRV subscription error: %" CHIP_ERROR_FORMAT, aError.Format());
+		RecordTrvPollError(aError);
+	}
+
+	void OnDone(chip::app::ReadClient *apReadClient) override
+	{
+		sTrvSubscribing = false;
+		sTrvSubscribed = false;
+		Nrf::PostTask([] { DisplayManager::Instance().SetTrvLinked(false); });
+		if (apReadClient == sTrvReadClient) {
+			Platform::Delete(sTrvReadClient);
+			sTrvReadClient = nullptr;
+		}
+	}
+
+	void OnDeallocatePaths(chip::app::ReadPrepareParams &&aReadPrepareParams) override
+	{
+		if (aReadPrepareParams.mpAttributePathParamsList != nullptr) {
+			Platform::MemoryFree(aReadPrepareParams.mpAttributePathParamsList);
+			aReadPrepareParams.mpAttributePathParamsList = nullptr;
+			aReadPrepareParams.mAttributePathParamsListSize = 0;
+		}
+	}
+
+private:
+	static void ApplyRemoteSetpoint(int16_t value)
+	{
+		if (sTrvSubscribedNodeId != sPrimaryTrvNodeId) {
+			return;
+		}
+
+		int32_t diff = abs(static_cast<int32_t>(value) - static_cast<int32_t>(sLastSentCompensatedSetpoint));
+		if (diff <= kSetpointEchoToleranceCentidegrees) {
+			LOG_INF("TRV setpoint matches our own last write - ignoring (echo)");
+			return;
+		}
+
+		SetRemoteSetpoint(value);
+
+		sLastSentCompensatedSetpoint = value;
+		LOG_INF("TRV setpoint differs from our last sent value - applying as external change");
+	}
+
+	static void ApplyRemoteLocalTemperature(int16_t trvLocalTemp)
+	{
+		if (sTrvSubscribedNodeId != sPrimaryTrvNodeId) {
+			return;
+		}
+
+		auto ownTemp = TemperatureManager::Instance().GetLocalTemp();
+		if (ownTemp.IsNull()) {
+			return;
+		}
+
+		int16_t rawOffset = static_cast<int16_t>(trvLocalTemp - ownTemp.Value());
+		int16_t cappedOffset = rawOffset;
+		if (cappedOffset > kMaxTrvOffsetMagnitude) {
+			cappedOffset = kMaxTrvOffsetMagnitude;
+		} else if (cappedOffset < -kMaxTrvOffsetMagnitude) {
+			cappedOffset = -kMaxTrvOffsetMagnitude;
+		}
+		if (cappedOffset != rawOffset) {
+			LOG_WRN("TRV offset %d exceeds +/-%d, capping to %d", rawOffset, kMaxTrvOffsetMagnitude, cappedOffset);
+		}
+
+		sTrvLocalTempOffset = cappedOffset;
+		sHasValidTrvOffset = true;
+		LOG_INF("TRV/Wandthermostat offset updated: %d (TRV=%d, own=%d)", sTrvLocalTempOffset, trvLocalTemp,
+			ownTemp.Value());
+	}
+};
+
+TemperatureSensor::TrvSubscriptionCallback TemperatureSensor::sTrvCallback;
+
+void TemperatureSensor::EnsureTrvSubscribed()
+{
+	if (sTrvFallbackToPolling || sTrvSubscribed) {
+		return;
+	}
+	if (sPrimaryTrvNodeId == 0) {
+		return;
+	}
+	if (sTrvSubscribing) {
+		if (sTrvReadClient != nullptr || k_uptime_get() - sTrvSubscribeStartMs < kTrvSubscribeStallMs) {
+			return;
+		}
+		LOG_WRN("TRV subscription attempt stalled - retrying");
+	}
+
+	sTrvSubscribing = true;
+	sTrvSubscribeStartMs = k_uptime_get();
+	sTrvSubscribedNodeId = sPrimaryTrvNodeId;
+
+	Nrf::Matter::BindingHandler::BindingData *data = Platform::New<Nrf::Matter::BindingHandler::BindingData>();
+	if (data) {
+		data->ClusterId = Clusters::Thermostat::Id;
+		data->EndpointId = mTemperatureMeasurementEndpointId;
+		data->InvokeCommandFunc = SubscribeTrvHandler;
+		BindingHandler::RunBoundClusterAction(data);
+	} else {
+		sTrvSubscribing = false;
+	}
+}
+
+void TemperatureSensor::SubscribeTrvHandler(const chip::app::Clusters::Binding::TableEntry &binding,
+					    OperationalDeviceProxy *deviceProxy,
+					    Nrf::Matter::BindingHandler::BindingData &bindingData)
+{
+	if (binding.nodeId != sTrvSubscribedNodeId) {
+		return;
+	}
+
+	if (deviceProxy == nullptr || !deviceProxy->ConnectionReady() || sTrvReadClient != nullptr) {
+		sTrvSubscribing = false;
+		return;
+	}
+
+	auto *paths = static_cast<chip::app::AttributePathParams *>(
+		Platform::MemoryCalloc(kTrvSubscriptionAttributeCount, sizeof(chip::app::AttributePathParams)));
+	if (paths == nullptr) {
+		LOG_ERR("TRV subscription: out of memory for attribute paths");
+		sTrvSubscribing = false;
+		return;
+	}
+
+	new (&paths[0]) chip::app::AttributePathParams(binding.remote, Clusters::Thermostat::Id,
+						       Clusters::Thermostat::Attributes::OccupiedHeatingSetpoint::Id);
+	new (&paths[1]) chip::app::AttributePathParams(binding.remote, Clusters::Thermostat::Id,
+						       Clusters::Thermostat::Attributes::PIHeatingDemand::Id);
+	new (&paths[2]) chip::app::AttributePathParams(binding.remote, Clusters::Thermostat::Id,
+						       Clusters::Thermostat::Attributes::LocalTemperature::Id);
+
+	chip::app::ReadPrepareParams params(deviceProxy->GetSecureSession().Value());
+	params.mpAttributePathParamsList = paths;
+	params.mAttributePathParamsListSize = kTrvSubscriptionAttributeCount;
+	params.mMinIntervalFloorSeconds = kTrvSubscriptionMinIntervalSeconds;
+	params.mMaxIntervalCeilingSeconds = kTrvSubscriptionMaxIntervalSeconds;
+	params.mKeepSubscriptions = true;
+
+	sTrvReadClient = Platform::New<chip::app::ReadClient>(chip::app::InteractionModelEngine::GetInstance(),
+							     deviceProxy->GetExchangeManager(), sTrvCallback,
+							     chip::app::ReadClient::InteractionType::Subscribe);
+	if (sTrvReadClient == nullptr) {
+		LOG_ERR("TRV subscription: out of memory for ReadClient");
+		Platform::MemoryFree(paths);
+		sTrvSubscribing = false;
+		return;
+	}
+
+	LOG_INF("TRV subscription: subscribing to node 0x%llX (min %us, max %us)", (unsigned long long)sTrvSubscribedNodeId,
+		kTrvSubscriptionMinIntervalSeconds, kTrvSubscriptionMaxIntervalSeconds);
+
+	chip::app::ReadClient *client = sTrvReadClient;
+	const CHIP_ERROR err = client->SendAutoResubscribeRequest(std::move(params));
+	if (err != CHIP_NO_ERROR) {
+		LOG_ERR("TRV subscription request failed: %" CHIP_ERROR_FORMAT, err.Format());
+		if (sTrvReadClient == client) {
+			Platform::Delete(client);
+			sTrvReadClient = nullptr;
+		}
+		sTrvSubscribing = false;
+	}
 }
