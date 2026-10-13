@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include <cstdint>
+
 #include <lib/core/CHIPError.h>
 #include <zephyr/kernel.h>
 
@@ -87,6 +89,12 @@ private:
 	bool mLastModeIsHeating = true;
 
 	int16_t mLastLocalTemp = 0;
+	/* Letzter Temperaturwert, der tatsaechlich einen Refresh ausgeloest hat
+	 * - getrennt von mLastLocalTemp, damit UpdateLocalTemperature() einen
+	 * Refresh unterdruecken kann, wenn sich seit dem letzten angezeigten
+	 * Wert weniger als 0.5 C geaendert hat. INT16_MIN als Sentinel sorgt
+	 * dafuer, dass der allererste Wert immer angezeigt wird. */
+	int16_t mLastDisplayedTemp = INT16_MIN;
 	uint16_t mLastHumidity = 0;
 	int16_t mLastSetpoint = 0;
 	uint8_t mLastBatteryPercent = 0;

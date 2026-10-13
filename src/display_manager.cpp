@@ -47,6 +47,14 @@ constexpr uint8_t kTextScale = 4;
 constexpr uint16_t kLine1Y = 70;
 constexpr uint16_t kLine2Y = 108;
 constexpr uint16_t kLine3Y = 146;
+
+/* Eigene, groessere Ansicht fuer den Setpoint-Button: nur Logo + zweizeilig
+ * "Setpoint:" (Label, kleiner) darueber und der Wert gross darunter - keine
+ * Temperatur/Feuchtigkeit/Batterie-Zeilen - siehe RenderFrame(). */
+constexpr uint8_t kSetpointLabelScale = 3;
+constexpr uint16_t kSetpointLabelY = 75;
+constexpr uint8_t kSetpointValueScale = 6;
+constexpr uint16_t kSetpointValueY = 115;
 constexpr uint16_t kTextX = 5;
 
 } /* namespace */
@@ -105,9 +113,21 @@ void DisplayManager::RenderFrame()
 	memset(mFramebuffer, 0xFF, mFramebufferSize);
 	font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kLogoX, kLogoY, eurotronic_logo_bitmap,
 			 EUROTRONIC_LOGO_WIDTH, EUROTRONIC_LOGO_HEIGHT);
-	font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine1Y, mLine1Text, kTextScale, 1);
-	font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine2Y, mLine2Text, kTextScale, 1);
-	font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine3Y, mLine3Text, kTextScale, 1);
+
+	if (mShowingSetpoint) {
+		/* Eigene Ansicht: Logo + Label "Setpoint:" + grosser Wert darunter
+		 * (mLine1Text enthaelt in diesem Zustand bereits z.B. "21.5C",
+		 * siehe RenderLine1()) - keine Temperatur/Feuchtigkeit/Batterie-
+		 * Zeilen. */
+		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kSetpointLabelY, "Setpoint:",
+				 kSetpointLabelScale, 1);
+		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kSetpointValueY, mLine1Text,
+				 kSetpointValueScale, 1);
+	} else {
+		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine1Y, mLine1Text, kTextScale, 1);
+		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine2Y, mLine2Text, kTextScale, 1);
+		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine3Y, mLine3Text, kTextScale, 1);
+	}
 
 	struct display_buffer_descriptor desc = {
 		.buf_size = mFramebufferSize,
@@ -163,7 +183,16 @@ void DisplayManager::ModeTimeoutHandler(struct k_work *work)
 void DisplayManager::UpdateLocalTemperature(int16_t centiDegrees)
 {
 	mLastLocalTemp = centiDegrees;
-	if (!mShowingSetpoint && !mShowingMode) {
+
+	/* Refresh nur bei >= 0.5 C Aenderung seit dem letzten angezeigten Wert -
+	 * verhindert unnoetige Full-Refreshes (Flackern, Panel-Verschleiss) bei
+	 * jeder kleinen SCD41-Messschwankung. Setpoint/Mode-Overlays bleiben
+	 * unveraendert sofort reaktionsfreudig (eigener Trigger-Pfad). */
+	constexpr int16_t kTempRefreshThreshold = 50; /* 0.5 C in centiDegrees */
+	bool thresholdCrossed = abs(centiDegrees - mLastDisplayedTemp) >= kTempRefreshThreshold;
+
+	if (!mShowingSetpoint && !mShowingMode && thresholdCrossed) {
+		mLastDisplayedTemp = centiDegrees;
 		RenderLine1();
 	}
 }
@@ -193,7 +222,12 @@ void DisplayManager::RenderLine1()
 	if (mShowingMode) {
 		snprintf(mLine1Text, sizeof(mLine1Text), "%s", mLastModeIsHeating ? "HEATING" : "OFF");
 	} else if (mShowingSetpoint) {
-		snprintf(mLine1Text, sizeof(mLine1Text), "S:%d.%dC", mLastSetpoint / 100,
+		/* Ohne "S:"-Praefix: bei kSetpointScale=6 (36px/Zeichen) passen nur
+		 * ca. 5 Zeichen in die 195px nutzbare Panelbreite - "21.5C" (5
+		 * Zeichen) reicht, "S:21.5C" (7 Zeichen) waere zu breit. Der
+		 * Kontext ("Setpoint") ist durch die eigene Vollbild-Ansicht
+		 * ohnehin klar, siehe RenderFrame(). */
+		snprintf(mLine1Text, sizeof(mLine1Text), "%d.%dC", mLastSetpoint / 100,
 			 abs(mLastSetpoint % 100) / 10);
 	} else {
 		snprintf(mLine1Text, sizeof(mLine1Text), "T:%d.%dC", mLastLocalTemp / 100,
