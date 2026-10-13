@@ -47,14 +47,14 @@ public:
 	void SetTrvOffline(bool offline)
 	{
 		mTrvOffline = offline;
-		RenderLine2();
+		RenderLine3();
 	}
 
-	/* True while the TRV subscription is established, shown as a check mark on line 2. */
+	/* True while the TRV subscription is established, shown as a check mark on line 3. */
 	void SetTrvLinked(bool linked)
 	{
 		mTrvLinked = linked;
-		RenderLine2();
+		RenderLine3();
 	}
 
 private:
@@ -62,6 +62,22 @@ private:
 	static void ModeTimeoutHandler(struct k_work *work);
 	void RenderLine1();
 	void RenderLine2();
+	void RenderLine3();
+	/* Clears the framebuffer, draws mLine1Text/mLine2Text/mLine3Text into
+	 * it with font_draw_string() and pushes one full-frame refresh. The
+	 * e-paper driver only supports full-frame writes, so all three lines
+	 * are always redrawn together, not line by line. */
+	void RenderFrame();
+
+	/* Bei kTextScale=4 passen max. ~8 Zeichen pro Zeile (200px Panelbreite)
+	 * - deshalb jetzt 3 kurze Zeilen statt 2 laengere. */
+	char mLine1Text[16] = "";
+	char mLine2Text[16] = "";
+	char mLine3Text[16] = "";
+	uint8_t *mFramebuffer = nullptr;
+	size_t mFramebufferSize = 0;
+	uint16_t mPanelWidth = 0;
+	uint16_t mPanelHeight = 0;
 
 	k_work_delayable mSetpointTimeout;
 	bool mShowingSetpoint = false;

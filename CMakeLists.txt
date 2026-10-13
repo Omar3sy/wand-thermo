@@ -38,6 +38,8 @@ target_sources(app PRIVATE
   src/temperature_manager.cpp
   src/temperature_measurement/sensor.cpp
   src/temperature_measurement/scd41.c
+  src/drivers/eink154.c
+  src/font_render.c
   src/zcl_callbacks.cpp
   ${ZEPHYR_NRF_MODULE_DIR}/samples/matter/common/src/binding/binding_handler.cpp
 )

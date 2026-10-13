@@ -1,0 +1,31 @@
+description: Microtech MTE0154A03B-V1 1.54" E-Paper Display
+
+compatible: "microtech,eink154"
+
+include: spi-device.yaml
+
+properties:
+  dc-gpios:
+    type: phandle-array
+    required: true
+    description: Data/Command GPIO
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Reset GPIO
+
+  busy-gpios:
+    type: phandle-array
+    required: true
+    description: Busy status GPIO
+
+  width:
+    type: int
+    required: true
+    description: Display width in pixels
+
+  height:
+    type: int
+    required: true
+    description: Display height in pixels

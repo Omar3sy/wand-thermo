@@ -55,6 +55,29 @@
 	};
 };
 
+/* Custom pinctrl for spi22, NOT the board's spi22_default: that one puts
+ * SCK on P1.11, which collides with i2c21's SDA (SCD41) above. SPIM pin
+ * mux on the nRF54L is freely assignable, so SCK/MOSI are moved to
+ * previously-unused pins instead. Write-only (display breakout only has
+ * BUSY/RST/DC/CS/CLK/DIN/GND/VCC - confirmed no SDO/MISO pin exists on
+ * this board at all), so MISO is left unconfigured. */
+&pinctrl {
+	spi22_eink_default: spi22_eink_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 1, 12)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 6)>;
+		};
+	};
+
+	spi22_eink_sleep: spi22_eink_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 1, 12)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 6)>;
+			low-power-enable;
+		};
+	};
+};
+
 / {
 	zephyr,user {
 		io-channels = <&adc 0>;
@@ -96,21 +119,38 @@
 		/delete-property/ pwm-led0;
 	};
 
-	auxdisplay: auxdisplay {
-		compatible = "hit,hd44780";
-		status = "okay";
-		columns = <16>;
-		rows = <2>;
-		mode = <4>;
+};
 
-		register-select-gpios = <&gpio1 10 GPIO_ACTIVE_HIGH>;  /* RS (was LED1) */
-		enable-gpios = <&gpio1 12 GPIO_ACTIVE_HIGH>;           /* E  */
+/* E-Paper (Microtech MTE0154A03B-V1) on the free spi22 instance, routed to
+ * the expansion header. This is real hardware SPI, not bitbanged - zephyr's
+ * spi-gpio driver doesn't exist in this NCS version (checked), and spi22 is
+ * exactly the instance Nordic's own board dtsi reserves for this purpose
+ * ("nordic_expansion_spi"). cs-gpios' default (P1.10) is kept; DC/RESET/BUSY
+ * are plain GPIOs on previously-unused pins.
+ *
+ * Note from Nordic's board dtsi: spi22 is documented there as conflicting
+ * with UART30 - our console is UART20, not UART30, and RTS on UART20
+ * happens to share this SPI's MOSI pin (P1.06). Unused as long as UART20
+ * hardware flow control stays off (the default); verify on the real board
+ * if the console misbehaves after this change.
+ *
+ * pinctrl-0/1 overridden below (spi22_eink_default/sleep), NOT the board's
+ * own spi22_default/sleep - those put SCK on P1.11, which is the SCD41's
+ * I2C SDA pin (see &i2c21 above). */
+&spi22 {
+	status = "okay";
+	pinctrl-0 = <&spi22_eink_default>;
+	pinctrl-1 = <&spi22_eink_sleep>;
+	pinctrl-names = "default", "sleep";
 
-		/* 4-bit mode: first four entries must be <0>, then D4..D7 */
-		data-bus-gpios = <0>, <0>, <0>, <0>,
-				 <&gpio2 6 GPIO_ACTIVE_HIGH>,          /* D4 */
-				 <&gpio2 8 GPIO_ACTIVE_HIGH>,          /* D5 */
-				 <&gpio2 10 GPIO_ACTIVE_HIGH>,         /* D6 */
-				 <&gpio1 14 GPIO_ACTIVE_HIGH>;         /* D7 (was LED3) */
+	eink_display: eink@0 {
+		compatible = "microtech,eink154";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+		dc-gpios = <&gpio2 6 GPIO_ACTIVE_HIGH>;     /* was D4 */
+		reset-gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;   /* was D5 */
+		busy-gpios = <&gpio2 10 GPIO_ACTIVE_HIGH>;  /* was D6 */
+		width = <200>;
+		height = <200>;
 	};
 };
