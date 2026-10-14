@@ -97,9 +97,14 @@ CHIP_ERROR DisplayManager::Init()
 	k_work_init_delayable(&mSetpointTimeout, DisplayManager::SetpointTimeoutHandler);
 	k_work_init_delayable(&mModeTimeout, DisplayManager::ModeTimeoutHandler);
 
-	RenderLine1();
-	RenderLine2();
-	RenderLine3();
+	/* Erster Render immer als Full-Frame (zeichnet Logo + alle drei Zeilen
+	 * zusammen) - Partial-Refresh setzt voraus, dass der aktuelle
+	 * Panel-Inhalt bereits mit mFramebuffer uebereinstimmt, was beim
+	 * allerersten Aufbau noch nicht der Fall ist. */
+	RenderLine1Text();
+	RenderLine2Text();
+	RenderLine3Text();
+	RenderFrame();
 
 	return CHIP_NO_ERROR;
 }
@@ -128,6 +133,17 @@ void DisplayManager::RenderFrame()
 		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine2Y, mLine2Text, kTextScale, 1);
 		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kLine3Y, mLine3Text, kTextScale, 1);
 	}
+
+	/* "Prev"-Puffer synchronisieren, damit der naechste RenderLinePartial()-
+	 * Aufruf gegen das vergleicht, was jetzt wirklich auf dem Panel steht -
+	 * sonst wuerde er faelschlich einen alten Diff gegenueber einem laengst
+	 * ueberholten Stand berechnen. */
+	strncpy(mLine1TextPrev, mLine1Text, sizeof(mLine1TextPrev) - 1);
+	mLine1TextPrev[sizeof(mLine1TextPrev) - 1] = '\0';
+	strncpy(mLine2TextPrev, mLine2Text, sizeof(mLine2TextPrev) - 1);
+	mLine2TextPrev[sizeof(mLine2TextPrev) - 1] = '\0';
+	strncpy(mLine3TextPrev, mLine3Text, sizeof(mLine3TextPrev) - 1);
+	mLine3TextPrev[sizeof(mLine3TextPrev) - 1] = '\0';
 
 	struct display_buffer_descriptor desc = {
 		.buf_size = mFramebufferSize,
@@ -215,7 +231,7 @@ void DisplayManager::UpdateHeatingDemand(uint8_t percent)
 	RenderLine3();
 }
 
-void DisplayManager::RenderLine1()
+void DisplayManager::RenderLine1Text()
 {
 	/* Bei kTextScale=4 passen max. ~8 Zeichen/Zeile - deshalb hier nur
 	 * noch Temperatur allein (Luftfeuchtigkeit ist jetzt Zeile 2). */
@@ -233,18 +249,58 @@ void DisplayManager::RenderLine1()
 		snprintf(mLine1Text, sizeof(mLine1Text), "T:%d.%dC", mLastLocalTemp / 100,
 			 abs(mLastLocalTemp % 100) / 10);
 	}
+}
 
-	RenderFrame();
+void DisplayManager::RenderLine1()
+{
+	RenderLine1Text();
+
+	/* Setpoint/Mode-Overlay hat ein komplett anderes Layout als die normale
+	 * 3-Zeilen-Ansicht (eigene Schriftgroessen/Positionen, siehe
+	 * RenderFrame()). Nur beim tatsaechlichen Wechsel zwischen den Layouts
+	 * (rein in bzw. raus aus dem Overlay) ist ein voller RenderFrame()
+	 * noetig - sonst blieben Reste der jeweils anderen Ansicht stehen.
+	 * Bleibt das Layout gleich (z.B. Setpoint-Wert aendert sich waehrend
+	 * das Overlay schon angezeigt wird), reicht ein Partial-Update des
+	 * betroffenen Textes. */
+	bool wantOverlay = mShowingMode || mShowingSetpoint;
+
+	if (wantOverlay != mLastRenderWasOverlay) {
+		RenderFrame();
+		mLastRenderWasOverlay = wantOverlay;
+		mPartialRefreshCount = 0;
+	} else if (mShowingSetpoint) {
+		RenderSetpointValuePartial();
+	} else if (mShowingMode) {
+		/* Mode-Text aendert sich praktisch nie waehrend das Overlay schon
+		 * steht (kein Hoch-/Runterzaehlen wie beim Setpoint) - einfachheits-
+		 * halber hier kein eigener Partial-Pfad. */
+		RenderFrame();
+	} else {
+		RenderLinePartial(0);
+	}
+}
+
+void DisplayManager::RenderLine2Text()
+{
+	snprintf(mLine2Text, sizeof(mLine2Text), "H:%u%%", mLastHumidity / 100);
 }
 
 void DisplayManager::RenderLine2()
 {
-	snprintf(mLine2Text, sizeof(mLine2Text), "H:%u%%", mLastHumidity / 100);
+	RenderLine2Text();
 
-	RenderFrame();
+	if (mLastRenderWasOverlay) {
+		/* Waehrend das Setpoint/Mode-Overlay aktiv ist, zeigt Zeile 2
+		 * ohnehin nichts an (siehe RenderFrame()) - nichts zu tun, der
+		 * naechste Full-Refresh beim Verlassen des Overlays uebernimmt das. */
+		return;
+	}
+
+	RenderLinePartial(1);
 }
 
-void DisplayManager::RenderLine3()
+void DisplayManager::RenderLine3Text()
 {
 	if (mTrvOffline) {
 		snprintf(mLine3Text, sizeof(mLine3Text), "OFFLINE");
@@ -263,6 +319,164 @@ void DisplayManager::RenderLine3()
 			snprintf(mLine3Text + len, sizeof(mLine3Text) - len, "%c", kLinkIconMarker);
 		}
 	}
+}
 
-	RenderFrame();
+void DisplayManager::RenderLine3()
+{
+	RenderLine3Text();
+
+	if (mLastRenderWasOverlay) {
+		return;
+	}
+
+	RenderLinePartial(2);
+}
+
+void DisplayManager::RenderLinePartial(uint8_t lineIndex)
+{
+	uint16_t lineY;
+	char *text;
+	char *prevText;
+	size_t textCapacity;
+
+	switch (lineIndex) {
+	case 0:
+		lineY = kLine1Y;
+		text = mLine1Text;
+		prevText = mLine1TextPrev;
+		textCapacity = sizeof(mLine1Text);
+		break;
+	case 1:
+		lineY = kLine2Y;
+		text = mLine2Text;
+		prevText = mLine2TextPrev;
+		textCapacity = sizeof(mLine2Text);
+		break;
+	case 2:
+		lineY = kLine3Y;
+		text = mLine3Text;
+		prevText = mLine3TextPrev;
+		textCapacity = sizeof(mLine3Text);
+		break;
+	default:
+		return;
+	}
+
+	RenderTextPartial(text, prevText, textCapacity, lineY, kTextScale);
+}
+
+void DisplayManager::RenderSetpointValuePartial()
+{
+	/* Waehrend die Setpoint-Vollbild-Ansicht aktiv ist, soll sich NUR der
+	 * Zahlenwert aendern duerfen (z.B. 21.5C -> 21.6C per Tastendruck), ohne
+	 * jedes Mal das ganze Panel neu zu zeichnen - Logo und "Setpoint:"-Label
+	 * bleiben dabei unberuehrt stehen. Gleiche Diff-Logik wie bei den
+	 * normalen Zeilen, nur mit der groesseren Setpoint-Schrift/-Position. */
+	RenderTextPartial(mLine1Text, mLine1TextPrev, sizeof(mLine1Text), kSetpointValueY, kSetpointValueScale);
+}
+
+void DisplayManager::RenderTextPartial(char *text, char *prevText, size_t textCapacity, uint16_t y,
+				       uint8_t scale)
+{
+	if (!device_is_ready(sDisplay) || mFramebuffer == nullptr) {
+		return;
+	}
+
+	if (strcmp(text, prevText) == 0) {
+		return; /* Text unveraendert - kein Refresh noetig */
+	}
+
+	/* Zeichen-Diff: nur die Spalten der tatsaechlich geaenderten Zeichen
+	 * aktualisieren (z.B. nur die "4" bei "H:54%" -> "H:55%", oder nur die
+	 * "5" bei einer Setpoint-Aenderung von 21.5C -> 21.6C), statt der
+	 * ganzen Zeile. kGlyphWidth/kCharAdvance muessen zu font5x7.h/
+	 * font_draw_string()'s Formel passen ((FONT5X7_WIDTH+1)*scale). */
+	constexpr uint16_t kGlyphWidth = 5;
+	uint16_t charAdvance = (kGlyphWidth + 1) * scale;
+	uint16_t glyphPixelWidth = kGlyphWidth * scale;
+
+	size_t newLen = strlen(text);
+	size_t prevLen = strlen(prevText);
+	size_t maxLen = newLen > prevLen ? newLen : prevLen;
+	bool firstRenderOfThisText = (prevText[0] == '\0');
+
+	size_t firstDiff = 0;
+	size_t lastDiff = (newLen > 0) ? newLen - 1 : 0;
+
+	if (!firstRenderOfThisText) {
+		firstDiff = maxLen;
+		for (size_t i = 0; i < maxLen; i++) {
+			char oldC = (i < prevLen) ? prevText[i] : '\0';
+			char newC = (i < newLen) ? text[i] : '\0';
+
+			if (oldC != newC) {
+				if (firstDiff == maxLen) {
+					firstDiff = i;
+				}
+				lastDiff = i;
+			}
+		}
+	}
+
+	/* Zeilenband: 2px Rand oberhalb der Glyphen, Hoehe = Glyphenhoehe (7*scale)
+	 * + Rand - deckt den Text vollstaendig ab. */
+	uint16_t bandY = y - 2;
+	uint16_t bandH = 7 * scale + 4;
+
+	if (bandY + bandH > mPanelHeight) {
+		bandH = mPanelHeight - bandY;
+	}
+
+	uint16_t startPx = kTextX + firstDiff * charAdvance;
+	uint16_t endPx = kTextX + lastDiff * charAdvance + glyphPixelWidth - 1;
+
+	/* Horizontal auf 8px-Grenzen ausrichten - vom Treiber fuer Partial-
+	 * Refresh verlangt (siehe eink154_set_partial_window()). */
+	uint16_t alignedStart = startPx & static_cast<uint16_t>(~0x07);
+	uint16_t alignedEnd = endPx | 0x07;
+
+	if (alignedEnd >= mPanelWidth) {
+		alignedEnd = mPanelWidth - 1;
+	}
+	uint16_t width = alignedEnd - alignedStart + 1;
+
+	size_t bytesPerRow = (mPanelWidth + 7) / 8;
+	size_t colByteStart = alignedStart / 8;
+	size_t colBytes = (width + 7) / 8;
+
+	/* Nur den betroffenen Spaltenbereich in diesem Zeilenband loeschen
+	 * (weiss) und neu zeichnen - nicht die ganze Zeile. */
+	for (uint16_t row = 0; row < bandH; row++) {
+		memset(&mFramebuffer[(bandY + row) * bytesPerRow + colByteStart], 0xFF, colBytes);
+	}
+	for (size_t i = firstDiff; i <= lastDiff; i++) {
+		char c = (i < newLen) ? text[i] : ' ';
+		uint16_t charX = kTextX + i * charAdvance;
+
+		font_draw_char(mFramebuffer, mPanelWidth, mPanelHeight, charX, y, c, scale, 1);
+	}
+
+	strncpy(prevText, text, textCapacity - 1);
+	prevText[textCapacity - 1] = '\0';
+
+	mPartialRefreshCount++;
+	if (mPartialRefreshCount >= kMaxPartialRefreshesBeforeFull) {
+		/* Ghosting-Vorbeugung: nach N Partial-Updates einen echten
+		 * Full-Refresh einschieben (siehe Recherche-Notiz zu Partial-Refresh). */
+		mPartialRefreshCount = 0;
+		RenderFrame();
+		return;
+	}
+
+	struct display_buffer_descriptor desc = {
+		.buf_size = static_cast<uint32_t>(colBytes) * bandH,
+		.width = width,
+		.height = bandH,
+		.pitch = mPanelWidth, /* Framebuffer-Zeilen bleiben volle Panelbreite */
+	};
+	int ret = display_write(sDisplay, alignedStart, bandY, &desc,
+				&mFramebuffer[bandY * bytesPerRow + colByteStart]);
+	if (ret != 0) {
+		LOG_ERR("E-paper partial refresh failed: %d", ret);
+	}
 }

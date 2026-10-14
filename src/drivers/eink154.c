@@ -255,6 +255,74 @@ static void eink154_display_update(const struct device *dev)
 	eink154_wait_busy(dev);
 }
 
+/* --- Partial Refresh (R90H/R91H/R92H) ---
+ *
+ * Registeradressen und Byte-Layout stammen direkt aus unserem eigenen
+ * Microtech-Datenblatt (Command Table S.23) - keine von einem fremden Panel
+ * geliehenen Werte. Die Befehlsreihenfolge (PTIN->PTL->DTM2->PON->DRF->POF->
+ * DTM1->PTOUT) folgt dem oeffentlich dokumentierten Muster der UC81xx-
+ * Chipfamilie (u.a. Zephyrs eigener uc81xx.c-Treiber). Es wird weiterhin die
+ * bereits bestaetigte volle Wellenform (eink154_lut_gc) genutzt - KEINE neue,
+ * ungeprüfte Partial-LUT. Dadurch bleibt der Refresh auf das angegebene
+ * Fenster begrenzt, flackert dort aber noch wie ein normaler Full-Refresh
+ * (echtes schnelles/flackerfreies Partial-Refresh braeuchte eine von
+ * Microtech bestaetigte eigene Wellenform - siehe offene Anfrage an Monica).
+ *
+ * Horizontale Fenstergrenzen muessen laut Registerformat auf 8-Pixel-Grenzen
+ * liegen (HRST[7:3]/HRED[7:3] - die unteren 3 Bit sind fest 0 bzw. 1).
+ * Vertikal (VRST/VRED) ist jede Zeile einzeln adressierbar, keine Rundung
+ * noetig. */
+
+static void eink154_set_partial_window(const struct device *dev, uint16_t hrst, uint16_t hred,
+					uint16_t vrst, uint16_t vred)
+{
+	uint8_t hrst_byte = (uint8_t)(hrst & 0xF8);
+	uint8_t hred_byte = (uint8_t)((hred & 0xF8) | 0x07);
+	uint8_t pt_scan_byte = 0x01; /* Datenblatt-Default (R90H letzte Zeile, Code 01h) */
+
+	eink154_send_cmd(dev, 0x90); /* PTL */
+	eink154_send_data_byte(dev, hrst_byte);
+	eink154_send_data_byte(dev, hred_byte);
+	eink154_send_data_byte(dev, (uint8_t)vrst);
+	eink154_send_data_byte(dev, (uint8_t)vred);
+	eink154_send_data_byte(dev, pt_scan_byte);
+}
+
+static void eink154_write_partial(const struct device *dev, uint16_t x, uint16_t y, uint16_t w,
+				  uint16_t h)
+{
+	const struct eink154_config *cfg = dev->config;
+	struct eink154_data *data = dev->data;
+	size_t bytes_per_row = (cfg->width + 7) / 8;
+	size_t col_byte_start = x / 8; /* x ist per Aufrufer-Vertrag bereits 8px-ausgerichtet */
+	size_t col_byte_end = ((x + w - 1) | 0x07) / 8;
+	size_t cols = col_byte_end - col_byte_start + 1;
+	uint16_t vrst = y;
+	uint16_t vred = y + h - 1;
+
+	eink154_wait_busy(dev);
+	eink154_send_cmd(dev, 0x91); /* PTIN */
+	eink154_set_partial_window(dev, x, x + w - 1, vrst, vred);
+
+	eink154_send_cmd(dev, 0x13); /* DTM2 - neue Daten */
+	for (uint16_t row = vrst; row <= vred; row++) {
+		const uint8_t *row_ptr = &data->framebuf[row * bytes_per_row + col_byte_start];
+		eink154_send_data_buf(dev, row_ptr, cols);
+	}
+
+	eink154_display_update(dev);
+
+	/* DTM1 ("alte" Daten) = dieselben neuen Daten, damit der interne
+	 * Vergleichspuffer des Chips synchron bleibt - wie im Full-Refresh-Pfad. */
+	eink154_send_cmd(dev, 0x10);
+	for (uint16_t row = vrst; row <= vred; row++) {
+		const uint8_t *row_ptr = &data->framebuf[row * bytes_per_row + col_byte_start];
+		eink154_send_data_buf(dev, row_ptr, cols);
+	}
+
+	eink154_send_cmd(dev, 0x92); /* PTOUT */
+}
+
 /* --- Zephyr display-API --- */
 
 static int eink154_write(const struct device *dev, const uint16_t x, const uint16_t y,
@@ -263,33 +331,57 @@ static int eink154_write(const struct device *dev, const uint16_t x, const uint1
 	const struct eink154_config *cfg = dev->config;
 	struct eink154_data *data = dev->data;
 
-	/* Vereinfachend: diese erste Version erwartet immer einen Full-Frame-Write
-	 * (x=0, y=0, desc->width=cfg->width, desc->height=cfg->height), passend zu
-	 * eurem bisherigen DisplayManager-Nutzungsmuster (ganze Zeilen neu schreiben).
-	 * Partial-Update ist beim full-refresh-Referenzcode ohnehin nicht vorgesehen. */
-	if (x != 0 || y != 0 || desc->width != cfg->width || desc->height != cfg->height) {
-		LOG_ERR("eink154: nur Full-Frame-Writes unterstuetzt in dieser Version");
-		return -ENOTSUP;
+	if (x == 0 && y == 0 && desc->width == cfg->width && desc->height == cfg->height) {
+		/* Full-Frame-Pfad, unveraendert. */
+		memcpy(data->framebuf, buf, data->framebuf_size);
+
+		/* Nach Microtechs dis_first(): "alte" Daten (konstant 0xFF) ueber 0x10,
+		 * dann das neue Bild ueber 0x13. Die im Referenzcode vorhandene
+		 * Invertierung (~new_dat[i]) wurde entfernt - erster Testlauf zeigte
+		 * schwarzen Hintergrund mit weissem Text (genau vertauscht), die
+		 * Invertierung war also fuer unsere Framebuffer-Konvention (bit=0 =
+		 * schwarz, siehe font_render.c) falsch herum. Ohne ~ passt es direkt:
+		 * weisser Hintergrund (Bit 1), schwarzer Text (Bit 0). */
+		eink154_send_cmd(dev, 0x10);
+		for (size_t i = 0; i < data->framebuf_size; i++) {
+			eink154_send_data_byte(dev, 0xFF);
+		}
+
+		eink154_send_cmd(dev, 0x13);
+		eink154_send_data_buf(dev, data->framebuf, data->framebuf_size);
+
+		eink154_display_update(dev);
+
+		return 0;
 	}
 
-	memcpy(data->framebuf, buf, data->framebuf_size);
-
-	/* Nach Microtechs dis_first(): "alte" Daten (konstant 0xFF) ueber 0x10,
-	 * dann das neue Bild ueber 0x13. Die im Referenzcode vorhandene
-	 * Invertierung (~new_dat[i]) wurde entfernt - erster Testlauf zeigte
-	 * schwarzen Hintergrund mit weissem Text (genau vertauscht), die
-	 * Invertierung war also fuer unsere Framebuffer-Konvention (bit=0 =
-	 * schwarz, siehe font_render.c) falsch herum. Ohne ~ passt es direkt:
-	 * weisser Hintergrund (Bit 1), schwarzer Text (Bit 0). */
-	eink154_send_cmd(dev, 0x10);
-	for (size_t i = 0; i < data->framebuf_size; i++) {
-		eink154_send_data_byte(dev, 0xFF);
+	/* Partial-Pfad: x muss 8px-ausgerichtet sein (PTL-Registerformat verlangt
+	 * das, siehe eink154_set_partial_window). */
+	if ((x % 8) != 0) {
+		LOG_ERR("eink154: partial write x muss durch 8 teilbar sein (x=%u)", x);
+		return -EINVAL;
+	}
+	if (y + desc->height > cfg->height || x + desc->width > cfg->width) {
+		LOG_ERR("eink154: partial write ausserhalb des Panels");
+		return -EINVAL;
 	}
 
-	eink154_send_cmd(dev, 0x13);
-	eink154_send_data_buf(dev, data->framebuf, data->framebuf_size);
+	/* Eingehende Teil-Bitmap (desc->width x desc->height, Zeilenbreite laut
+	 * desc->pitch) in den passenden Ausschnitt des Master-Framebuffers kopieren. */
+	size_t bytes_per_row = (cfg->width + 7) / 8;
+	size_t src_bytes_per_row = (desc->pitch ? desc->pitch : desc->width + 7) / 8;
+	size_t dst_col_byte = x / 8;
+	size_t copy_bytes = (desc->width + 7) / 8;
+	const uint8_t *src = (const uint8_t *)buf;
 
-	eink154_display_update(dev);
+	for (uint16_t row = 0; row < desc->height; row++) {
+		uint8_t *dst_row = &data->framebuf[(y + row) * bytes_per_row + dst_col_byte];
+		const uint8_t *src_row = &src[row * src_bytes_per_row];
+
+		memcpy(dst_row, src_row, copy_bytes);
+	}
+
+	eink154_write_partial(dev, x, y, desc->width, desc->height);
 
 	return 0;
 }
