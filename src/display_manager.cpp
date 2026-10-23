@@ -96,6 +96,8 @@ CHIP_ERROR DisplayManager::Init()
 
 	k_work_init_delayable(&mSetpointTimeout, DisplayManager::SetpointTimeoutHandler);
 	k_work_init_delayable(&mModeTimeout, DisplayManager::ModeTimeoutHandler);
+	k_work_init_delayable(&mSetpointRenderDebounce, DisplayManager::SetpointRenderDebounceHandler);
+	k_work_init_delayable(&mModeRenderDebounce, DisplayManager::ModeRenderDebounceHandler);
 
 	/* Erster Render immer als Full-Frame (zeichnet Logo + alle drei Zeilen
 	 * zusammen) - Partial-Refresh setzt voraus, dass der aktuelle
@@ -167,15 +169,35 @@ void DisplayManager::ShowSetpointTemporarily()
 		mLastSetpoint = setpoint;
 	}
 
+	bool wasAlreadyShowing = mShowingSetpoint;
 	mShowingSetpoint = true;
-	RenderLine1();
+
+	if (!wasAlreadyShowing) {
+		/* Erstmaliges Oeffnen der Ansicht (Full-Refresh, Layoutwechsel) -
+		 * passiert nur einmal pro Druckserie, sofort rendern. */
+		RenderLine1();
+	} else {
+		/* Weitere Druecke waehrend die Ansicht schon offen ist: den
+		 * eigentlichen, teuren Display-Refresh entprellen - siehe
+		 * kSetpointRenderDebounceMs. Verhindert, dass sich bei schnellem
+		 * Mehrfach-Klicken blockierende Busy-Wait-Zyklen auf dem App-Thread
+		 * stapeln (konnte sonst in Extremfaellen den Watchdog ausloesen). */
+		k_work_reschedule(&mSetpointRenderDebounce, K_MSEC(kSetpointRenderDebounceMs));
+	}
 
 	k_work_reschedule(&mSetpointTimeout, kSetpointDisplayDuration);
+}
+
+void DisplayManager::SetpointRenderDebounceHandler(struct k_work *work)
+{
+	DisplayManager::Instance().RenderLine1();
 }
 
 void DisplayManager::SetpointTimeoutHandler(struct k_work *work)
 {
 	DisplayManager &self = DisplayManager::Instance();
+
+	k_work_cancel_delayable(&self.mSetpointRenderDebounce);
 	self.mShowingSetpoint = false;
 	self.RenderLine1();
 }
@@ -183,15 +205,29 @@ void DisplayManager::SetpointTimeoutHandler(struct k_work *work)
 void DisplayManager::ShowModeTemporarily(bool isHeating)
 {
 	mLastModeIsHeating = isHeating;
+
+	bool wasAlreadyShowing = mShowingMode;
 	mShowingMode = true;
-	RenderLine1();
+
+	if (!wasAlreadyShowing) {
+		RenderLine1();
+	} else {
+		k_work_reschedule(&mModeRenderDebounce, K_MSEC(kSetpointRenderDebounceMs));
+	}
 
 	k_work_reschedule(&mModeTimeout, K_SECONDS(3));
+}
+
+void DisplayManager::ModeRenderDebounceHandler(struct k_work *work)
+{
+	DisplayManager::Instance().RenderLine1();
 }
 
 void DisplayManager::ModeTimeoutHandler(struct k_work *work)
 {
 	DisplayManager &self = DisplayManager::Instance();
+
+	k_work_cancel_delayable(&self.mModeRenderDebounce);
 	self.mShowingMode = false;
 	self.RenderLine1();
 }
@@ -216,7 +252,18 @@ void DisplayManager::UpdateLocalTemperature(int16_t centiDegrees)
 void DisplayManager::UpdateHumidity(uint16_t centiPercent)
 {
 	mLastHumidity = centiPercent;
-	RenderLine2();
+
+	/* Refresh nur bei >= 5 Prozentpunkten Aenderung seit dem letzten
+	 * angezeigten Wert - gleiche Logik wie bei der Temperatur-Schwelle,
+	 * verhindert unnoetige Refreshes bei jeder kleinen Messschwankung. */
+	constexpr uint16_t kHumidityRefreshThreshold = 500; /* 5 Prozentpunkte in centiPercent */
+	uint16_t diff = (centiPercent > mLastDisplayedHumidity) ? (centiPercent - mLastDisplayedHumidity)
+								 : (mLastDisplayedHumidity - centiPercent);
+
+	if (diff >= kHumidityRefreshThreshold) {
+		mLastDisplayedHumidity = centiPercent;
+		RenderLine2();
+	}
 }
 
 void DisplayManager::UpdateBattery(uint8_t percentHalfUnits)

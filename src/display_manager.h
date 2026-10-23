@@ -62,6 +62,8 @@ public:
 private:
 	static void SetpointTimeoutHandler(struct k_work *work);
 	static void ModeTimeoutHandler(struct k_work *work);
+	static void SetpointRenderDebounceHandler(struct k_work *work);
+	static void ModeRenderDebounceHandler(struct k_work *work);
 	void RenderLine1();
 	void RenderLine2();
 	void RenderLine3();
@@ -114,8 +116,23 @@ private:
 	k_work_delayable mSetpointTimeout;
 	bool mShowingSetpoint = false;
 
+	/* Entprellung gegen schnelles Mehrfach-Druecken des Setpoint-Buttons:
+	 * jeder Druck aktualisiert mLastSetpoint sofort (guenstig, kein SPI),
+	 * aber der eigentliche (teure, blockierende) Display-Refresh wird erst
+	 * ausgeloest, wenn fuer kSetpointRenderDebounceMs kein weiterer Druck
+	 * kam - sonst stapeln sich bei schnellem Klicken viele blockierende
+	 * Busy-Wait-Zyklen auf dem App-Thread und koennen in Extremfaellen den
+	 * Watchdog auslösen ("Systemabsturz" bei Vielfach-Klicks). */
+	static constexpr int32_t kSetpointRenderDebounceMs = 150;
+	k_work_delayable mSetpointRenderDebounce;
+
 	k_work_delayable mModeTimeout;
 	bool mShowingMode = false;
+
+	/* Gleiches Entprell-Prinzip wie mSetpointRenderDebounce (siehe dort) -
+	 * aus Konsistenz-/Sicherheitsgruenden, auch wenn der Mode-Button
+	 * (Doppelklick) seltener gespammt wird als +/-. */
+	k_work_delayable mModeRenderDebounce;
 	bool mLastModeIsHeating = true;
 
 	int16_t mLastLocalTemp = 0;
@@ -126,6 +143,10 @@ private:
 	 * dafuer, dass der allererste Wert immer angezeigt wird. */
 	int16_t mLastDisplayedTemp = INT16_MIN;
 	uint16_t mLastHumidity = 0;
+	/* Analog zu mLastDisplayedTemp: letzter Feuchtigkeitswert, der einen
+	 * Refresh ausgeloest hat. UINT16_MAX als Sentinel sorgt dafuer, dass der
+	 * allererste Wert immer angezeigt wird (Differenz ist dann riesig). */
+	uint16_t mLastDisplayedHumidity = UINT16_MAX;
 	int16_t mLastSetpoint = 0;
 	uint8_t mLastBatteryPercent = 0;
 	uint8_t mLastHeatingDemand = 0;
@@ -134,9 +155,10 @@ private:
 	bool mTrvLinked = false;
 
 	/* Sicherheitsnetz gegen Ghosting/Image-Retention bei wiederholtem
-	 * Partial-Refresh (Empfehlung aus Recherche: alle ~5 Partial-Updates
-	 * einen echten Full-Refresh einschieben). */
-	static constexpr uint8_t kMaxPartialRefreshesBeforeFull = 5;
+	 * Partial-Refresh - Microtechs eigene Empfehlung (Monica, 2026-10-19):
+	 * "perform 10 partial refreshes followed by one full refresh" (Alternative:
+	 * 30:1). Hier auf 15 gesetzt, zwischen den beiden genannten Werten. */
+	static constexpr uint8_t kMaxPartialRefreshesBeforeFull = 15;
 	uint8_t mPartialRefreshCount = 0;
 
 	/* Verhindert Partial-Refresh-Artefakte beim Wechsel zwischen der

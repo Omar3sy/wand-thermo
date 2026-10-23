@@ -14,7 +14,9 @@
 
 using namespace chip;
 
-constexpr uint16_t kSensorTimerPeriodMs = 30000; /* 30s timer period*/
+/* 5min Timer-Periode (Stromsparen) - uint32_t statt uint16_t, da 300000ms
+ * den uint16_t-Wertebereich (max 65535) sprengen wuerde. */
+constexpr uint32_t kSensorTimerPeriodMs = 300000;
 
 class TempSensorManager {
 public:

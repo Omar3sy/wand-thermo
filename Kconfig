@@ -29,6 +29,46 @@ config THERMOSTAT_SIMULATED_TEMPERATURE_CHANGE
 config CHIP_ENABLE_READ_CLIENT
 	default y
 
+config WT_DISABLE_TRV_SUBSCRIPTION
+	bool "Power-Messtest: TRV-Subscription deaktiviert"
+	default n
+	help
+	  Nur fuer die PPK2-Stromverbrauchsmessung - keine Subscription zum
+	  TRV-Heizkoerperventil. NICHT fuer normale Builds, das Ventil wird
+	  dann nicht angesteuert.
+
+config WT_DISABLE_SENSOR
+	bool "Power-Messtest: SCD41-Sensor-Timer deaktiviert"
+	default n
+	help
+	  Nur fuer die PPK2-Stromverbrauchsmessung - kein SCD41-Polling.
+	  NICHT fuer normale Builds, es werden keine Temperatur-/
+	  Feuchtigkeitswerte gemessen.
+
+config WT_DISABLE_DISPLAY
+	bool "Power-Messtest: E-Paper-Display deaktiviert"
+	default n
+	help
+	  Nur fuer die PPK2-Stromverbrauchsmessung - Display-Treiber wird nicht
+	  initialisiert, keine Refreshes. NICHT fuer normale Builds, das Geraet
+	  zeigt dann nichts an.
+
+config WT_POWER_TEST_MINIMAL
+	bool "Power-Messtest: TRV-Subscription, Sensor-Timer und Display-Updates deaktiviert"
+	default n
+	select WT_DISABLE_TRV_SUBSCRIPTION
+	select WT_DISABLE_SENSOR
+	select WT_DISABLE_DISPLAY
+	help
+	  Nur fuer die PPK2-Stromverbrauchsmessung (Test A) - lasst nur ICD/Thread
+	  Boot+Attach+Idle laufen, ohne jegliche TRV-Subscription, SCD41-Polling
+	  oder E-Paper-Refreshes. Isoliert den reinen ICD/Thread-Stromanteil vom
+	  Rest der Anwendung. Kombiniert die drei einzelnen Schalter unten - fuer
+	  gezieltere Tests (nur EINEN Verbraucher abschalten) die einzelnen
+	  Schalter direkt setzen statt diesen hier. NICHT fuer normale Builds
+	  verwenden - das Geraet zeigt dann keine Werte an und aktualisiert das
+	  Ventil nicht.
+
 # Sample configuration used for Thread networking
 if OPENTHREAD
 

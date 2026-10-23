@@ -147,9 +147,16 @@
 		compatible = "microtech,eink154";
 		reg = <0>;
 		spi-max-frequency = <1000000>;
-		dc-gpios = <&gpio2 6 GPIO_ACTIVE_HIGH>;     /* was D4 */
-		reset-gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;   /* was D5 */
-		busy-gpios = <&gpio2 10 GPIO_ACTIVE_HIGH>;  /* was D6 */
+		/* P2.06/08/10 (vorherige Belegung) sind laut nRF54L15 DK Hardware
+		 * User Guide standardmaessig mit dem Debug-TRACE-Port verbunden
+		 * (TRACECLK/TRACEDATA[1]/TRACEDATA[3]) - nicht freie GPIOs. Das
+		 * erklaerte, warum RESET per Software nicht auf LOW zu bekommen
+		 * war (TRACE-Port-Treiber ueberstimmt den Software-Pegel). Auf
+		 * P0 verschoben - dort ist laut Devicetree nur P0.04 (Button3)
+		 * belegt, keine SWD/Debug-Pins. */
+		dc-gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
 		width = <200>;
 		height = <200>;
 	};

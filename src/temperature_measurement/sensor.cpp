@@ -876,6 +876,9 @@ TemperatureSensor::TrvSubscriptionCallback TemperatureSensor::sTrvCallback;
 
 void TemperatureSensor::EnsureTrvSubscribed()
 {
+#if IS_ENABLED(CONFIG_WT_DISABLE_TRV_SUBSCRIPTION)
+	return; /* Power-Messtest: keine TRV-Subscription, siehe Kconfig-Hilfetext */
+#endif
 	if (sTrvFallbackToPolling || sTrvSubscribed) {
 		return;
 	}

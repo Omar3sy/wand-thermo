@@ -209,10 +209,12 @@ CHIP_ERROR AppTask::Init()
 			LOG_ERR("BatteryManager Init fail");
 			return err;
 		}
+#if !IS_ENABLED(CONFIG_WT_DISABLE_DISPLAY)
 		err = DisplayManager::Instance().Init();
 		if (err != CHIP_NO_ERROR) {
 			LOG_ERR("DisplayManager Init fail");
 		}
+#endif /* !CONFIG_WT_DISABLE_DISPLAY */
 		return err;
 	} }));
 

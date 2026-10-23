@@ -31,6 +31,13 @@ struct eink154_data {
 	 * alloziert statt wie beim Referenzcode fest auf 200x200 anzunehmen. */
 	uint8_t *framebuf;
 	size_t framebuf_size;
+	/* True nach eink154_deep_sleep() - Power Off (0x02) alleine liess den
+	 * Booster/VCOM-Analogteil im Standby weiterlaufen (gemessen: deutlich
+	 * mehr Ruhestrom als erwartet). Deep Sleep (0x07/0xA5) schaltet den
+	 * Analogteil komplett ab, braucht dafuer vor dem naechsten Schreiben
+	 * einen kompletten Hardware-Reset + IC-Neuinit (siehe
+	 * eink154_wake_if_sleeping()). */
+	bool sleeping;
 };
 
 /* --- Low-Level SPI --- */
@@ -231,6 +238,53 @@ static const uint8_t eink154_lut_gc[210] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
 };
 
+/* "DU" - Microtechs EIGENE, von Monica am 2026-10-19 bestaetigte und
+ * mitgeschickte Partial-Refresh-Wellenform (nicht mehr geraten/abgeleitet).
+ * Chip ist nachweislich ein JADARD JD79650AA (R70H/REV von Monica
+ * bestaetigt). Gleiches 42-Byte/7-Byte-Phase-Format wie eink154_lut_gc,
+ * nur Phase 1 aktiv je Sektion, Phasen 2-6 genullt - wird NUR fuer den
+ * Partial-Refresh-Pfad genutzt (eink154_write_partial()), niemals fuer
+ * Full-Refresh. Die volle LUT (eink154_lut_gc) bleibt unberuehrt und wird
+ * nach jedem Partial-Refresh wiederhergestellt (Register sind global am
+ * Chip, nicht pfadspezifisch getrennt). */
+static const uint8_t eink154_lut_du[210] = {
+	/* VCOM */
+	0x01, 0x19, 0x01, 0x00, 0x00, 0x01, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	/* LUT_WW */
+	0x01, 0x19, 0x01, 0x00, 0x00, 0x01, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	/* LUT_BW */
+	0x01, 0x99, 0x01, 0x00, 0x00, 0x01, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	/* LUT_WB */
+	0x01, 0x59, 0x01, 0x00, 0x00, 0x01, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	/* LUT_BB */
+	0x01, 0x19, 0x01, 0x00, 0x00, 0x01, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
 static void eink154_load_lut(const struct device *dev, const uint8_t *lut)
 {
 	eink154_send_cmd(dev, 0x20); /* VCOM */
@@ -253,6 +307,56 @@ static void eink154_display_update(const struct device *dev)
 	eink154_wait_busy(dev);
 	eink154_send_cmd(dev, 0x02); /* Power Off */
 	eink154_wait_busy(dev);
+}
+
+/* Deep Sleep (0x07/0xA5) - schaltet den Analogteil (Booster/VCOM) komplett
+ * ab, im Gegensatz zu Power Off alleine. Danach braucht der Chip vor dem
+ * naechsten Schreibzugriff einen kompletten Hardware-Reset + IC-Neuinit,
+ * siehe eink154_wake_if_sleeping(). */
+static void eink154_deep_sleep(const struct device *dev)
+{
+	struct eink154_data *data = dev->data;
+
+	/* Datenblatt S.33: "This command only active when BUSY_N = '1'." Die
+	 * vorherige Operation (POF nach einem Refresh, oder PON+LUT-Laden beim
+	 * Boot-Init) hat zwar schon einmal auf Busy gewartet, aber dazwischen
+	 * liegen noch weitere SPI-Schreibvorgaenge (z.B. LUT) - ohne diesen
+	 * erneuten Check direkt vor 0x07 bestand das Risiko, dass der Befehl
+	 * bei BUSY_N=0 (noch) stillschweigend ignoriert wird (kein Fehler,
+	 * keine Rueckmeldung - Chip bleibt einfach wach). */
+	eink154_wait_busy(dev);
+
+	eink154_send_cmd(dev, 0x07);
+	eink154_send_data_byte(dev, 0xA5);
+	data->sleeping = true;
+
+	/* Messung zeigte: solange DC/RESET nach dem letzten Transfer auf HIGH
+	 * stehen bleiben (DC=1 vom letzten Datenbyte, RESET=released), bleibt
+	 * der Stromverbrauch im mA-Bereich - unabhaengig vom internen Deep-
+	 * Sleep-Register des Chips. Vermutlich haelt einer dieser Pegel einen
+	 * Transistor/Pegelwandler auf dem Breakout-Board offen. RESET wieder
+	 * zu asserten ist hier unschaedlich (eink154_wake_if_sleeping() macht
+	 * ohnehin einen vollen Hardware-Reset vor dem naechsten Schreiben) und
+	 * DC auf LOW zu ziehen kostet nichts, da im Sleep-Zustand kein
+	 * Command/Data-Unterschied mehr relevant ist. */
+	const struct eink154_config *cfg = dev->config;
+	gpio_pin_set_dt(&cfg->dc_gpio, 0);
+	gpio_pin_set_dt(&cfg->reset_gpio, 1); /* assert - haelt den Chip im Reset */
+}
+
+static void eink154_wake_if_sleeping(const struct device *dev)
+{
+	struct eink154_data *data = dev->data;
+
+	if (!data->sleeping) {
+		return;
+	}
+
+	eink154_hw_reset(dev);
+	eink154_wait_busy(dev);
+	eink154_ic_init(dev);
+	eink154_load_lut(dev, eink154_lut_gc);
+	data->sleeping = false;
 }
 
 /* --- Partial Refresh (R90H/R91H/R92H) ---
@@ -288,8 +392,12 @@ static void eink154_set_partial_window(const struct device *dev, uint16_t hrst, 
 	eink154_send_data_byte(dev, pt_scan_byte);
 }
 
+/* old_data: der tatsaechliche VORHERIGE Inhalt des Fensters (vom Aufrufer
+ * vor dem Ueberschreiben gesichert), Zeilenbreite old_stride Byte -
+ * entscheidend fuer die DU-LUT, die zwischen WW/BW/WB/BB unterscheidet;
+ * alt==neu ueberall wuerde nur WW/BB (keine sichtbare Aenderung) ausloesen. */
 static void eink154_write_partial(const struct device *dev, uint16_t x, uint16_t y, uint16_t w,
-				  uint16_t h)
+				  uint16_t h, const uint8_t *old_data, size_t old_stride)
 {
 	const struct eink154_config *cfg = dev->config;
 	struct eink154_data *data = dev->data;
@@ -301,8 +409,20 @@ static void eink154_write_partial(const struct device *dev, uint16_t x, uint16_t
 	uint16_t vred = y + h - 1;
 
 	eink154_wait_busy(dev);
+
+	/* Monicas bestaetigte Partial-LUT laden (siehe eink154_lut_du) - nur
+	 * fuer diesen Refresh, danach wird eink154_lut_gc wiederhergestellt. */
+	eink154_load_lut(dev, eink154_lut_du);
+
 	eink154_send_cmd(dev, 0x91); /* PTIN */
 	eink154_set_partial_window(dev, x, x + w - 1, vrst, vred);
+
+	/* Reihenfolge wie in Monicas dis_pic()-Referenz: erst DTM1 (alte
+	 * Daten), dann DTM2 (neue Daten), dann erst der eigentliche Refresh. */
+	eink154_send_cmd(dev, 0x10); /* DTM1 - alte Daten */
+	for (uint16_t row = 0; row < h; row++) {
+		eink154_send_data_buf(dev, &old_data[row * old_stride], cols);
+	}
 
 	eink154_send_cmd(dev, 0x13); /* DTM2 - neue Daten */
 	for (uint16_t row = vrst; row <= vred; row++) {
@@ -312,15 +432,13 @@ static void eink154_write_partial(const struct device *dev, uint16_t x, uint16_t
 
 	eink154_display_update(dev);
 
-	/* DTM1 ("alte" Daten) = dieselben neuen Daten, damit der interne
-	 * Vergleichspuffer des Chips synchron bleibt - wie im Full-Refresh-Pfad. */
-	eink154_send_cmd(dev, 0x10);
-	for (uint16_t row = vrst; row <= vred; row++) {
-		const uint8_t *row_ptr = &data->framebuf[row * bytes_per_row + col_byte_start];
-		eink154_send_data_buf(dev, row_ptr, cols);
-	}
-
 	eink154_send_cmd(dev, 0x92); /* PTOUT */
+
+	/* Volle, bestaetigte LUT sofort wiederherstellen - die Register sind
+	 * global am Chip, nicht pfadspezifisch. Ohne dieses Zuruecksetzen
+	 * wuerde ein nachfolgender Full-Refresh versehentlich ebenfalls die
+	 * Partial-LUT verwenden. */
+	eink154_load_lut(dev, eink154_lut_gc);
 }
 
 /* --- Zephyr display-API --- */
@@ -330,6 +448,8 @@ static int eink154_write(const struct device *dev, const uint16_t x, const uint1
 {
 	const struct eink154_config *cfg = dev->config;
 	struct eink154_data *data = dev->data;
+
+	eink154_wake_if_sleeping(dev);
 
 	if (x == 0 && y == 0 && desc->width == cfg->width && desc->height == cfg->height) {
 		/* Full-Frame-Pfad, unveraendert. */
@@ -351,6 +471,7 @@ static int eink154_write(const struct device *dev, const uint16_t x, const uint1
 		eink154_send_data_buf(dev, data->framebuf, data->framebuf_size);
 
 		eink154_display_update(dev);
+		eink154_deep_sleep(dev);
 
 		return 0;
 	}
@@ -366,13 +487,27 @@ static int eink154_write(const struct device *dev, const uint16_t x, const uint1
 		return -EINVAL;
 	}
 
-	/* Eingehende Teil-Bitmap (desc->width x desc->height, Zeilenbreite laut
-	 * desc->pitch) in den passenden Ausschnitt des Master-Framebuffers kopieren. */
+	/* Nach Monicas dis_pic()-Referenz: DTM1 (0x10) braucht den ECHTEN alten
+	 * Fensterinhalt, nicht denselben wie der neue - sonst sieht die LUT
+	 * ueberall "alt==neu" und waehlt nur die WW/BB-Uebergaenge (keine
+	 * sichtbare Aenderung). Deshalb hier den aktuellen (noch alten) Inhalt
+	 * des Fensters VOR dem Ueberschreiben sichern. */
 	size_t bytes_per_row = (cfg->width + 7) / 8;
 	size_t src_bytes_per_row = (desc->pitch ? desc->pitch : desc->width + 7) / 8;
 	size_t dst_col_byte = x / 8;
 	size_t copy_bytes = (desc->width + 7) / 8;
 	const uint8_t *src = (const uint8_t *)buf;
+	size_t oldBufSize = copy_bytes * desc->height;
+	uint8_t *oldBuf = k_malloc(oldBufSize);
+
+	if (oldBuf == NULL) {
+		LOG_ERR("eink154: kein Speicher fuer alten Fensterinhalt (%zu Byte)", oldBufSize);
+		return -ENOMEM;
+	}
+	for (uint16_t row = 0; row < desc->height; row++) {
+		memcpy(&oldBuf[row * copy_bytes],
+		       &data->framebuf[(y + row) * bytes_per_row + dst_col_byte], copy_bytes);
+	}
 
 	for (uint16_t row = 0; row < desc->height; row++) {
 		uint8_t *dst_row = &data->framebuf[(y + row) * bytes_per_row + dst_col_byte];
@@ -381,7 +516,9 @@ static int eink154_write(const struct device *dev, const uint16_t x, const uint1
 		memcpy(dst_row, src_row, copy_bytes);
 	}
 
-	eink154_write_partial(dev, x, y, desc->width, desc->height);
+	eink154_write_partial(dev, x, y, desc->width, desc->height, oldBuf, copy_bytes);
+	k_free(oldBuf);
+	eink154_deep_sleep(dev);
 
 	return 0;
 }
@@ -446,7 +583,13 @@ static int eink154_init(const struct device *dev)
 	eink154_hw_reset(dev);
 	eink154_wait_busy(dev);
 	eink154_ic_init(dev);
+#if EINK154_USE_FAST_LUT
+	LOG_WRN("eink154: EXPERIMENTELLE schnelle LUT aktiv - nicht von Microtech bestaetigt!");
+	eink154_load_lut(dev, eink154_lut_fast);
+#else
 	eink154_load_lut(dev, eink154_lut_gc);
+#endif
+	eink154_deep_sleep(dev);
 
 	LOG_INF("eink154: initialisiert, %ux%u", cfg->width, cfg->height);
 	return 0;

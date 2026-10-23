@@ -22,6 +22,7 @@ k_timer sSensorTimer;
 
 CHIP_ERROR TempSensorManager::Init()
 {
+#if !IS_ENABLED(CONFIG_WT_DISABLE_SENSOR)
 	k_timer_init(&sSensorTimer, &TempSensorManager::TimerEventHandler, nullptr);
 	k_timer_start(&sSensorTimer, K_MSEC(kSensorTimerPeriodMs), K_MSEC(kSensorTimerPeriodMs));
 	/* Workaround: Default null values are not correctly propagated from the zap file. Set it manually to make sure
@@ -29,6 +30,7 @@ CHIP_ERROR TempSensorManager::Init()
 	TempSensorManager::Instance().ClearLocalTemperature();
 	TempSensorManager::Instance().ClearOutdoorTemperature();
 	TemperatureSensor::Instance().FullMeasurement();
+#endif /* !CONFIG_WT_DISABLE_SENSOR */
 
 	return CHIP_NO_ERROR;
 }
