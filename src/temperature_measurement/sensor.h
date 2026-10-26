@@ -120,4 +120,12 @@ private:
 
 	k_thread mScd41Thread;
 	k_thread_stack_t *mScd41ThreadStack;
+
+	/* Einmaliger Early-Kick fuer EnsureTrvSubscribed(), unabhaengig vom
+	 * (jetzt 5-Minuten-)Sensor-Zyklus - sonst wuerde die Subscription erst
+	 * beim naechsten FullMeasurement()-Tick starten, also auch erst nach
+	 * 5 Minuten. 3 Minuten geben den TRV-Polls aus dem allerersten
+	 * FullMeasurement() (bei Boot) genug Zeit, die Node-ID zu liefern. */
+	static void EarlySubscribeKickHandler(struct k_work *work);
+	k_work_delayable mEarlySubscribeKick;
 };

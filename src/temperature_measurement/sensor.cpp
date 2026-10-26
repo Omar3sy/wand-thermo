@@ -132,6 +132,14 @@ TemperatureSensor::TemperatureSensor()
 	mScd41ThreadStack = sScd41ThreadStack;
 	BindingHandler::Init();
 	sBootUptimeMs = k_uptime_get();
+
+	k_work_init_delayable(&mEarlySubscribeKick, TemperatureSensor::EarlySubscribeKickHandler);
+	k_work_schedule(&mEarlySubscribeKick, K_MINUTES(3));
+}
+
+void TemperatureSensor::EarlySubscribeKickHandler(struct k_work *work)
+{
+	TemperatureSensor::Instance().EnsureTrvSubscribed();
 }
 
 void TemperatureSensor::FullMeasurement()
@@ -142,8 +150,10 @@ void TemperatureSensor::FullMeasurement()
 	PollTrvHeatingDemand();
 	PollTrvLocalTemperature();
 	/* Runs after the polls above, so the primary TRV is usually not known yet on the
-	 * very first cycle: its first answer arrives asynchronously. The subscription
-	 * therefore starts one cycle later (about 30 s), by design. */
+	 * very first cycle: its first answer arrives asynchronously. Mirrors the
+	 * dedicated 3-Minuten-Early-Kick (mEarlySubscribeKick) below - this call here
+	 * is idempotent and just catches the case where the sensor cycle (5 min) runs
+	 * before the 3-Minuten-Kick, or as a retry if the first attempt stalled. */
 	EnsureTrvSubscribed();
 }
 
