@@ -38,6 +38,13 @@ struct eink154_data {
 	 * einen kompletten Hardware-Reset + IC-Neuinit (siehe
 	 * eink154_wake_if_sleeping()). */
 	bool sleeping;
+	/* Gesetzt von eink154_wait_busy() bei Timeout (Panel haengt wirklich,
+	 * z.B. Wackelkontakt). Ohne das wuerde der Code nach einem Timeout
+	 * einfach blind weiterschreiben, als waere der vorherige Schritt
+	 * erfolgreich gewesen - das Panel bliebe dauerhaft in undefiniertem
+	 * Zustand. Wird am Anfang des naechsten eink154_write() geprueft und
+	 * loest dort einen erzwungenen Hardware-Reset + Re-Init aus. */
+	bool faulted;
 };
 
 /* --- Low-Level SPI --- */
@@ -100,6 +107,7 @@ static int eink154_send_data_buf(const struct device *dev, const uint8_t *data, 
 static void eink154_wait_busy(const struct device *dev)
 {
 	const struct eink154_config *cfg = dev->config;
+	struct eink154_data *data = dev->data;
 	int initial = gpio_pin_get_dt(&cfg->busy_gpio);
 	int waited_ms = 0;
 	const int timeout_ms = 15000;
@@ -113,6 +121,10 @@ static void eink154_wait_busy(const struct device *dev)
 
 	if (waited_ms >= timeout_ms) {
 		LOG_WRN("eink154: busy wait timed out after %d ms (pin stayed low)", waited_ms);
+		/* Panel haengt wirklich - naechster eink154_write() erzwingt einen
+		 * Hardware-Reset + Re-Init, statt blind von einem erfolgreichen
+		 * Zustand auszugehen (siehe eink154_data::faulted). */
+		data->faulted = true;
 	} else {
 		LOG_INF("eink154: busy wait: initial=%d final=%d waited=%d ms", initial, final, waited_ms);
 	}
@@ -450,6 +462,24 @@ static int eink154_write(const struct device *dev, const uint16_t x, const uint1
 	struct eink154_data *data = dev->data;
 
 	eink154_wake_if_sleeping(dev);
+
+	if (data->faulted) {
+		/* Vorheriger Refresh hat einen Busy-Timeout gehabt - Panel-Zustand
+		 * ist unbekannt. Erzwungener Hardware-Reset + Re-Init statt blind
+		 * weiterzuschreiben; data->sleeping wurde von wake_if_sleeping()
+		 * oben bereits auf false gesetzt, hier nur die eigentliche
+		 * Wiederherstellung. */
+		LOG_WRN("eink154: recovering from a previous busy-wait timeout (forced reset+reinit)");
+		/* Vorher loeschen, nicht danach: falls der Wait innerhalb dieser
+		 * Recovery selbst erneut timeout (Panel wirklich defekt), soll
+		 * eink154_wait_busy() das Flag unten erneut setzen koennen, statt
+		 * dass wir es blind wieder auf false ueberschreiben. */
+		data->faulted = false;
+		eink154_hw_reset(dev);
+		eink154_wait_busy(dev);
+		eink154_ic_init(dev);
+		eink154_load_lut(dev, eink154_lut_gc);
+	}
 
 	if (x == 0 && y == 0 && desc->width == cfg->width && desc->height == cfg->height) {
 		/* Full-Frame-Pfad, unveraendert. */

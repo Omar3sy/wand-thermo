@@ -52,7 +52,7 @@
        (uint16_t)0x7FFF}, /* OccupiedHeatingSetpoint */                        \
       {(uint16_t)0x2BC, (uint16_t)-0x6AB3,                                     \
        (uint16_t)0x7FFF}, /* MinHeatSetpointLimit */                           \
-      {(uint16_t)0xBB8, (uint16_t)-0x6AB3,                                     \
+      {(uint16_t)0xB22, (uint16_t)-0x6AB3,                                     \
        (uint16_t)0x7FFF}, /* MaxHeatSetpointLimit */                           \
       {(uint16_t)0x640, (uint16_t)-0x6AB3,                                     \
        (uint16_t)0x7FFF}, /* MinCoolSetpointLimit */                           \
@@ -716,7 +716,7 @@
            ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* OutdoorTemperature */             \
       {ZAP_SIMPLE_DEFAULT(700), 0x00000003, 2, ZAP_TYPE(TEMPERATURE),          \
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* AbsMinHeatSetpointLimit */            \
-      {ZAP_SIMPLE_DEFAULT(3000), 0x00000004, 2, ZAP_TYPE(TEMPERATURE),         \
+      {ZAP_SIMPLE_DEFAULT(2850), 0x00000004, 2, ZAP_TYPE(TEMPERATURE),         \
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* AbsMaxHeatSetpointLimit */            \
       {ZAP_SIMPLE_DEFAULT(1600), 0x00000005, 2, ZAP_TYPE(TEMPERATURE),         \
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* AbsMinCoolSetpointLimit */            \

@@ -44,7 +44,7 @@ constexpr int64_t kDoublePressWindowMs = 600;
 
 constexpr int16_t kSetpointStep = 50;   /* 0.5 °C step, Matter units are centi-degrees */
 constexpr int16_t kSetpointMin = 700;   /* 7.0 °C */
-constexpr int16_t kSetpointMax = 3000;  /* 30.0 °C */
+constexpr int16_t kSetpointMax = 2850;  /* 28.5 °C */
 
 constexpr uint32_t kBindingHoldTimeMs = 15000;
 constexpr uint32_t kBindingBlinkIntervalMs = 150;
@@ -210,10 +210,24 @@ CHIP_ERROR AppTask::Init()
 			return err;
 		}
 #if !IS_ENABLED(CONFIG_WT_DISABLE_DISPLAY)
-		err = DisplayManager::Instance().Init();
-		if (err != CHIP_NO_ERROR) {
-			LOG_ERR("DisplayManager Init fail");
-		}
+		/* DisplayManager::Init() macht zwei komplette Full-Frame-Refreshes
+		 * (White-Balance-Test + RenderFrame()) mit mehreren Hardware-Busy-
+		 * Waits (teils >2s) - lief bisher SYNCHRON hier in diesem Callback,
+		 * der direkt auf dem CHIP/Matter-Thread ausgefuehrt wird. Das
+		 * blockierte den Matter-Thread beim Boot fuer >6s ("Long dispatch
+		 * time" im Log) und fiel zeitlich exakt mit zwei fehlgeschlagenen
+		 * DNS-SD-Advertise-Versuchen zusammen (vermutlich kausal - der
+		 * Stack war waehrend der Display-Init in einem inkonsistenten
+		 * Zwischenzustand). Jetzt entkoppelt via PostTask auf den App-
+		 * Thread, damit der Matter-Server-Start nicht blockiert. Nichts
+		 * haengt von einem sofort fertigen Display ab - die ersten echten
+		 * Werte kommen ohnehin erst durch die spaeteren Update*()-Aufrufe. */
+		Nrf::PostTask([] {
+			CHIP_ERROR displayErr = DisplayManager::Instance().Init();
+			if (displayErr != CHIP_NO_ERROR) {
+				LOG_ERR("DisplayManager Init fail");
+			}
+		});
 #endif /* !CONFIG_WT_DISABLE_DISPLAY */
 		return err;
 	} }));

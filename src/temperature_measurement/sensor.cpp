@@ -66,6 +66,24 @@ constexpr int16_t kMaxTrvOffsetMagnitude = 500; /* +/- 5.0 C */
 constexpr uint8_t kTrvOfflineFailureThreshold = 3;
 uint8_t sTrvConsecutiveFailures = 0;
 
+/* Nach dem "offline"-Schwellenwert pollt der Poll-Fallback-Pfad weiterhin im
+ * vollen 5-Minuten-Grundtakt (kSensorTimerPeriodMs), unbegrenzt - das lohnt
+ * sich nicht bei einem laengeren Ausfall (Funkverkehr ohne Nutzen, siehe
+ * Pendant-Fix auf der TRV-Seite). Deshalb: 3-stufige Drossel, basierend auf
+ * der Zeit seit "offline geworden", nicht auf dem Fehlzaehler selbst (der
+ * zaehlt nur tatsaechliche Versuche, also wuerde ein modulo-basierter Ansatz
+ * sich selbst verlangsamen). */
+constexpr int64_t kTrvBackoffStage2OfflineMs = 30 * 60 * 1000; /* 30 min offline */
+constexpr int64_t kTrvBackoffStage3OfflineMs = 60 * 60 * 1000; /* 60 min offline */
+int64_t sTrvOfflineSinceMs = 0; /* 0 = nicht offline */
+uint32_t sTrvPollTickCounter = 0;
+
+/* Analog zum TRV-seitigen Fix ("jede 20. Wiederholung"): ohne das wuerde die
+ * einzige Warnung einmalig beim Erreichen der Schwelle feuern und danach nie
+ * wieder - bei einem sehr langen Ausfall faellt die Sichtbarkeit im Log dann
+ * komplett weg, obwohl der Zustand weiterhin anhaelt. */
+constexpr uint8_t kTrvFailureLogRepeatEvery = 20;
+
 constexpr uint32_t kStartupGraceMs = 60000;
 int64_t sBootUptimeMs = 0;
 
@@ -73,6 +91,8 @@ void RecordTrvPollSuccess()
 {
 	bool wasOffline = sTrvConsecutiveFailures >= kTrvOfflineFailureThreshold;
 	sTrvConsecutiveFailures = 0;
+	sTrvOfflineSinceMs = 0;
+	sTrvPollTickCounter = 0;
 	if (wasOffline) {
 		Nrf::PostTask([] { DisplayManager::Instance().SetTrvOffline(false); });
 	}
@@ -89,7 +109,35 @@ void RecordTrvPollFailure()
 	}
 	if (sTrvConsecutiveFailures == kTrvOfflineFailureThreshold) {
 		LOG_WRN("TRV unreachable after %u consecutive failed polls", sTrvConsecutiveFailures);
+		sTrvOfflineSinceMs = k_uptime_get();
 		Nrf::PostTask([] { DisplayManager::Instance().SetTrvOffline(true); });
+	} else if (sTrvConsecutiveFailures > kTrvOfflineFailureThreshold &&
+		   (sTrvConsecutiveFailures - kTrvOfflineFailureThreshold) % kTrvFailureLogRepeatEvery == 0) {
+		LOG_WRN("TRV still unreachable after %u consecutive failed polls", sTrvConsecutiveFailures);
+	}
+}
+
+/* Entscheidet, ob dieser FullMeasurement()-Zyklus die drei PollTrv*()-Aufrufe
+ * tatsaechlich macht, oder ob (bei einem laengeren Ausfall) dieser Zyklus
+ * ausgelassen wird. Normalbetrieb/kurzer Ausfall: jeden Zyklus (5 min,
+ * unveraendert). Ab 30 min Ausfall: nur jeden 2. Zyklus (~10 min). Ab 60 min:
+ * nur jeden 6. Zyklus (~30 min). */
+bool ShouldAttemptTrvPollThisCycle()
+{
+	sTrvPollTickCounter++;
+
+	if (sTrvOfflineSinceMs == 0) {
+		return true;
+	}
+
+	int64_t offlineDurationMs = k_uptime_get() - sTrvOfflineSinceMs;
+
+	if (offlineDurationMs < kTrvBackoffStage2OfflineMs) {
+		return true;
+	} else if (offlineDurationMs < kTrvBackoffStage3OfflineMs) {
+		return (sTrvPollTickCounter % 2) == 0;
+	} else {
+		return (sTrvPollTickCounter % 6) == 0;
 	}
 }
 
@@ -146,9 +194,11 @@ void TemperatureSensor::FullMeasurement()
 {
 	InternalMeasurement();
 	ExternalMeasurement();
-	PollTrvSetpoint();
-	PollTrvHeatingDemand();
-	PollTrvLocalTemperature();
+	if (ShouldAttemptTrvPollThisCycle()) {
+		PollTrvSetpoint();
+		PollTrvHeatingDemand();
+		PollTrvLocalTemperature();
+	}
 	/* Runs after the polls above, so the primary TRV is usually not known yet on the
 	 * very first cycle: its first answer arrives asynchronously. Mirrors the
 	 * dedicated 3-Minuten-Early-Kick (mEarlySubscribeKick) below - this call here
@@ -207,6 +257,18 @@ void TemperatureSensor::Scd41ThreadEntry(void *, void *, void *)
 	if (ret == 0) {
 		ret = scd41_read_measurement_raw(sScd41I2cDev, kScd41I2cAddr, &co2, &temp_millideg_c,
 						  &humidity_milli_percent, &co2_raw, &temp_raw, &rh_raw);
+	}
+
+	if (ret != 0) {
+		/* I2C-Fehler (z.B. SCL/SDA haengt durch einen Wackelkontakt auf
+		 * LOW) - Bus-Recovery-Sequenz anstossen, statt einfach beim naechsten
+		 * Zyklus denselben haengenden Bus erneut zu versuchen. Der nrfx-
+		 * twim-Treiber unterstuetzt i2c_recover_bus() nativ (Clock-Toggle-
+		 * Sequenz), sicher auch aufzurufen, wenn der Bus gar nicht wirklich
+		 * haengt. */
+		int recoverRet = i2c_recover_bus(sScd41I2cDev);
+		LOG_WRN("SCD41 I2C error (%d) - bus recovery %s", ret,
+			recoverRet == 0 ? "ok" : "failed");
 	}
 
 	scd41_power_down(sScd41I2cDev, kScd41I2cAddr);

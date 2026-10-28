@@ -3630,13 +3630,13 @@ endpoint 1 {
     ram      attribute localTemperature;
     ram      attribute outdoorTemperature;
     ram      attribute absMinHeatSetpointLimit default = 700;
-    ram      attribute absMaxHeatSetpointLimit default = 3000;
+    ram      attribute absMaxHeatSetpointLimit default = 2850;
     ram      attribute absMinCoolSetpointLimit default = 1600;
     ram      attribute absMaxCoolSetpointLimit default = 3200;
     ram      attribute occupiedCoolingSetpoint default = 2600;
     persist  attribute occupiedHeatingSetpoint default = 2000;
     ram      attribute minHeatSetpointLimit default = 700;
-    ram      attribute maxHeatSetpointLimit default = 3000;
+    ram      attribute maxHeatSetpointLimit default = 2850;
     ram      attribute minCoolSetpointLimit default = 1600;
     ram      attribute maxCoolSetpointLimit default = 3200;
     ram      attribute minSetpointDeadBand default = 25;
