@@ -113,6 +113,24 @@ private:
 	 * (siehe RenderLine1Text()). Zeichnet kein Clear und keine Pfeile (die
 	 * zeichnet der Aufrufer separat, siehe RenderFrame()). */
 	void DrawSetpointValueSplit(const char *text);
+	/* Zeichnet Ziffern/Punkt bei scale 6 oder 4 ueber die hochaufgeloeste
+	 * big_digit_font.h statt der groben 5x7-Pixel-Schrift hochskaliert -
+	 * sonst wirken die grossen Zahlen sehr "pixelig". Andere Zeichen (z.B.
+	 * "HEATING"/"OFF") fallen auf die normale Schrift zurueck. */
+	void DrawBigNumberText(uint16_t x, uint16_t y, const char *str, uint8_t scale);
+	/* Einzelzeichen-Variante von DrawBigNumberText(), fuer den Zeichen-Diff
+	 * in RenderTextPartial() (dort wird zeichenweise statt stringweise
+	 * gezeichnet). */
+	void DrawBigNumberChar(uint16_t x, uint16_t y, char c, uint8_t scale);
+	/* Vorschubbreite fuer ein einzelnes Zeichen - normalerweise CharAdvance(),
+	 * aber ums Komma in der grossen Zahl enger (siehe Implementierung). Von
+	 * DrawBigNumberText() UND RenderTextPartial() genutzt, damit Voll- und
+	 * Partial-Render exakt gleich positionieren. */
+	uint16_t CharAdvanceFor(char c, uint8_t scale);
+	/* Summiert CharAdvanceFor() fuer alle Zeichen vor "index" auf - liefert
+	 * die tatsaechliche X-Position dieses Zeichens, auch wenn einzelne
+	 * Zeichen (z.B. das Komma) einen abweichenden Vorschub haben. */
+	uint16_t CharPositionX(uint16_t x, const char *text, size_t index, uint8_t scale);
 
 	/* Das Panel sitzt 90 Grad gedreht im Gehaeuse (Querformat-Montage) -
 	 * Logo/Text/Icons werden weiterhin ganz normal "logisch" (Hochformat-

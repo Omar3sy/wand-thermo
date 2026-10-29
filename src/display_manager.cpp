@@ -24,6 +24,8 @@
 #include "link_icon.h"
 #include "setpoint_arrows_icon.h"
 #include "misc_icons.h"
+#include "big_digit_font.h"
+#include "battery_low_icon.h"
 
 LOG_MODULE_DECLARE(app, CONFIG_CHIP_APP_LOG_LEVEL);
 
@@ -36,6 +38,19 @@ const struct device *sDisplay = DEVICE_DT_GET(DT_NODELABEL(eink_display));
 
 constexpr uint16_t kTextX = 5;
 
+/* Zeichenabstand fuer Ziffern (DrawBigNumberText/-Char, RenderTextPartial):
+ * fester kleiner Pixel-Abstand statt 1*scale zusaetzlichem Abstand - bei
+ * grossen Scales (z.B. kBigValueScale=8) wirkte 1*scale (=8px) Luecke
+ * zwischen den Ziffern sehr gross, 3px feste Luecke sieht enger/kompakter
+ * aus und bleibt bei jeder Scale gleich eng. Glyphenbreite ist weiterhin
+ * 5*scale (wie font5x7/big_digit_font.h), nur der Zwischenraum ist jetzt
+ * fest statt proportional. */
+constexpr uint16_t kCharGapPx = 0;
+constexpr uint16_t CharAdvance(uint16_t scale)
+{
+	return static_cast<uint16_t>(5 * scale + kCharGapPx);
+}
+
 /* Kein Firmenlogo mehr (auf Nutzerwunsch entfernt). Icon-Reihe oben mittig:
  * WLAN (immer sichtbar) + Punkte/X (Bindungsstatus), exakt auf gleicher
  * Hoehe nebeneinander (oben buendig, nicht mehr vertikal zueinander
@@ -46,9 +61,12 @@ constexpr uint16_t kTextX = 5;
  * nur beim aktiven Heizen). */
 constexpr uint16_t kIconRowY = 10;
 constexpr uint16_t kIconRowGap = 4;
-constexpr uint16_t kIconRowWidth =
-	LINK_ICON_WIDTH + kIconRowGap + DOTS_ICON_WIDTH + kIconRowGap + HEATING_ICON_WIDTH;
-constexpr uint16_t kIconRowStartX = (200 - kIconRowWidth) / 2;
+/* Fest statt aus den (jetzt kleineren) Icon-Breiten zentriert berechnet -
+ * damit die X-Positionen der Icons beim Verkleinern unveraendert bleiben
+ * (auf Nutzerwunsch), statt sich neu zu zentrieren und zu verschieben. War
+ * urspruenglich (200 - kIconRowWidth) / 2 mit den damaligen Breiten
+ * (44/36/56) = 28. */
+constexpr uint16_t kIconRowStartX = 32;
 
 constexpr uint16_t kLinkIconX = kIconRowStartX;
 constexpr uint16_t kLinkIconY = kIconRowY;
@@ -71,16 +89,21 @@ constexpr uint16_t kIconRowMaxHeight = 56; /* = LINK_ICON_HEIGHT, groesstes Icon
 
 /* Grosser Zahlenwert ohne "C"-Suffix (das "C" wird separat klein daneben
  * gezeichnet) - unterhalb der Icon-Reihe (endet bei kIconRowY+56=56). */
-constexpr uint8_t kBigValueScale = 6;
-/* Minimal nach rechts verschoben (war 5, wie kSetpointIntX/kTextX). */
-constexpr uint16_t kBigValueX = 10;
+constexpr uint8_t kBigValueScale = 8;
+/* "21.5" bei Scale 8 ist 4 Zeichen * 48px = 192px breit - kBigValueX muss
+ * klein genug sein, dass das noch in die 200px Panelbreite passt. */
+constexpr uint16_t kBigValueX = 4;
 constexpr uint16_t kBigValueY = 76;
-constexpr uint16_t kUnitLabelScale = 2;
-constexpr uint16_t kUnitLabelX = kBigValueX + 4 * 6 * 6 + 4;
-constexpr uint16_t kUnitLabelY = kBigValueY + 8;
-/* "21.5" bei Scale 6 ist 4 Zeichen * 36px = 144px breit - bandY=74,
- * bandH=7*6+4=46, endet bei y=120. */
-constexpr uint16_t kBigValueBottomY = 120;
+/* Eine Stufe kleiner (war 2) - mit dem jetzt engeren Zeichenabstand
+ * (kCharGapPx=1) passt "°C" bei dieser Groesse wieder rechts neben die
+ * Zahl, statt darunter. */
+constexpr uint16_t kUnitLabelScale = 1;
+/* Direkt nach dem reservierten Platz fuer 4 Zeichen ("21.5"), wieder rechts
+ * neben der Zahl statt darunter. Scale-unabhaengige Formel (CharAdvance()
+ * statt hartkodierter Werte). */
+constexpr uint16_t kUnitLabelX = kBigValueX + 4 * CharAdvance(kBigValueScale) + 4;
+constexpr uint16_t kUnitLabelY = kBigValueY + 4;
+constexpr uint16_t kBigValueBottomY = kUnitLabelY + 7 * kUnitLabelScale + 2;
 
 /* Setpoint-Overlay: eigene Darstellung des Werts statt der normalen
  * einzeiligen Zahl - Ganzzahlteil gross (kBigValueScale, Platz fuer max. 2
@@ -101,10 +124,13 @@ constexpr uint16_t kSetpointIntX = kTextX - 3; /* etwas naeher am Panelrand als 
  * kHumidityIconYSetpoint Kaskadeneffekte bis in die Normalansicht-Batterie-
  * Zeile). */
 constexpr uint16_t kSetpointIntY = 76;
-constexpr uint16_t kSetpointDecScale = 4;
-constexpr uint16_t kSetpointDecX = kSetpointIntX + kSetpointIntDigits * 6 * kBigValueScale + 4;
+/* Scale 3 statt 4 - bei kBigValueScale=8 braucht der Ganzzahlteil schon
+ * 96px, da bleibt sonst nicht mehr genug Platz fuer Nachkommastelle+Icon+
+ * Pfeile vor dem rechten Panelrand. */
+constexpr uint16_t kSetpointDecScale = 3;
+constexpr uint16_t kSetpointDecX = kSetpointIntX + kSetpointIntDigits * CharAdvance(kBigValueScale) + 4;
 constexpr uint16_t kSetpointDecY = kSetpointIntY + 7 * kBigValueScale - 7 * kSetpointDecScale;
-constexpr uint16_t kSetpointDecWidth = 2 * 6 * kSetpointDecScale; /* ".5" = 2 Zeichen */
+constexpr uint16_t kSetpointDecWidth = 2 * CharAdvance(kSetpointDecScale); /* ".5" = 2 Zeichen */
 constexpr uint16_t kSetpointValueBottomY = kSetpointIntY + 7 * kBigValueScale + 2;
 constexpr uint16_t kSetpointCScale = 2;
 /* Pfeile auf Hoehe der Setpoint-Wert-Zeile (kSetpointIntY), rechtsbuendig am
@@ -135,13 +161,13 @@ constexpr uint16_t kHumidityIconYSetpoint =
 constexpr uint16_t kHumidityIconYNormal = kHumidityIconYSetpoint;
 constexpr uint16_t kHumidityStartXNormal = 25;
 constexpr uint16_t kHumidityStartXSetpoint = 25;
-constexpr uint16_t kHumidityTextScale = 4;
+constexpr uint16_t kHumidityTextScale = kSetpointDecScale; /* teilt sich die big_digit_font_dec-Tabelle */
 
-/* Batterie: kleine Zahl unten links. y=184 ist das Maximum, das bei Scale 2
- * noch komplett innerhalb der 200px Panelhoehe bleibt (bandY=182,
- * bandH=7*2+4=18, Ende=200). */
-constexpr uint16_t kBatteryTextScale = 2;
-constexpr uint16_t kBatteryTextY = 184;
+/* Batterie-niedrig-Warnsymbol, unten rechts in der Ecke. Erstmal
+ * unbedingt gezeichnet, zum Ansehen - die 10%-Bedingung kommt danach. */
+constexpr uint16_t kBatteryLowIconX = 200 - BATTERY_LOW_ICON_WIDTH - 4;
+constexpr uint16_t kBatteryLowIconY = 200 - BATTERY_LOW_ICON_HEIGHT - 4;
+
 
 } /* namespace */
 
@@ -224,9 +250,75 @@ void DisplayManager::BootSplashTimeoutHandler(struct k_work *work)
 	});
 }
 
+void DisplayManager::DrawBigNumberChar(uint16_t x, uint16_t y, char c, uint8_t scale)
+{
+	int idx = -1;
+	if (c >= '0' && c <= '9') {
+		idx = c - '0';
+	} else if (c == ',') {
+		idx = 10;
+	}
+
+	if (idx == 10 && scale == kBigValueScale) {
+		/* Komma in der grossen Zahl (normale Temperaturanzeige) deutlich
+		 * kleiner als die Ziffern - nutzt das kleine Dec-Glyph, unten
+		 * ausgerichtet im normalerweise fuer eine grosse Ziffer reservierten
+		 * Platz. 1px naeher an die vorherige Ziffer als rein zentriert (per
+		 * Nutzerwunsch engerer Abstand davor); der Abstand danach wird ueber
+		 * CharAdvanceFor()'s kuerzeren Vorschub fuers Komma verringert, nicht
+		 * hier. */
+		uint16_t smallX = x + 3; /* knapp hinter der vorherigen Ziffer statt mittig im Slot */
+		uint16_t smallY = y + (7 * kBigValueScale - BIG_DIGIT_DEC_HEIGHT);
+		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, smallX, smallY, &big_digit_font_dec[idx][0][0],
+				 BIG_DIGIT_DEC_WIDTH, BIG_DIGIT_DEC_HEIGHT);
+	} else if (idx >= 0 && scale == kBigValueScale) {
+		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, x, y, &big_digit_font_big[idx][0][0],
+				 BIG_DIGIT_BIG_WIDTH, BIG_DIGIT_BIG_HEIGHT);
+	} else if (idx >= 0 && scale == kSetpointDecScale) {
+		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, x, y, &big_digit_font_dec[idx][0][0],
+				 BIG_DIGIT_DEC_WIDTH, BIG_DIGIT_DEC_HEIGHT);
+	} else {
+		font_draw_char(mFramebuffer, mPanelWidth, mPanelHeight, x, y, c, scale, 1);
+	}
+}
+
+uint16_t DisplayManager::CharAdvanceFor(char c, uint8_t scale)
+{
+	if (c == ',' && scale == kBigValueScale) {
+		/* Komma bekommt einen eigenen, engen Slot statt des vollen Ziffern-
+		 * Vorschubs: 3px Abstand davor (siehe DrawBigNumberChar()) + die
+		 * Glyphenbreite + 3px Abstand danach - statt ~12px Luecke auf jeder
+		 * Seite wie beim zentrierten Platzieren im vollen 40px-Slot. */
+		return static_cast<uint16_t>(3 + BIG_DIGIT_DEC_WIDTH + 3);
+	}
+	return CharAdvance(scale);
+}
+
+uint16_t DisplayManager::CharPositionX(uint16_t x, const char *text, size_t index, uint8_t scale)
+{
+	size_t textLen = strlen(text);
+	uint16_t pos = x;
+	for (size_t i = 0; i < index; i++) {
+		char c = (i < textLen) ? text[i] : ' '; /* wie im Zeichnen-Loop in RenderTextPartial() */
+		pos += CharAdvanceFor(c, scale);
+	}
+	return pos;
+}
+
+void DisplayManager::DrawBigNumberText(uint16_t x, uint16_t y, const char *str, uint8_t scale)
+{
+	uint16_t cursorX = x;
+
+	while (*str != '\0') {
+		DrawBigNumberChar(cursorX, y, *str, scale);
+		cursorX += CharAdvanceFor(*str, scale);
+		str++;
+	}
+}
+
 void DisplayManager::DrawSetpointValueSplit(const char *text)
 {
-	const char *dot = strchr(text, '.');
+	const char *dot = strchr(text, ','); /* Variablenname "dot" historisch, Trennzeichen ist jetzt "," */
 	size_t intLen = dot != nullptr ? static_cast<size_t>(dot - text) : strlen(text);
 
 	char intPart[8];
@@ -241,13 +333,12 @@ void DisplayManager::DrawSetpointValueSplit(const char *text)
 	 * ausgehen. */
 	uint16_t intX = kSetpointIntX;
 	if (copyLen < kSetpointIntDigits) {
-		intX += static_cast<uint16_t>((kSetpointIntDigits - copyLen) * 6 * kBigValueScale);
+		intX += static_cast<uint16_t>((kSetpointIntDigits - copyLen) * CharAdvance(kBigValueScale));
 	}
 
-	font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, intX, kSetpointIntY, intPart, kBigValueScale, 1);
+	DrawBigNumberText(intX, kSetpointIntY, intPart, kBigValueScale);
 	if (dot != nullptr) {
-		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kSetpointDecX, kSetpointDecY, dot,
-				 kSetpointDecScale, 1);
+		DrawBigNumberText(kSetpointDecX, kSetpointDecY, dot, kSetpointDecScale);
 	}
 	/* Icon wird hier mitgezeichnet (statt nur einmal in RenderFrame), weil
 	 * der Partial-Update-Pfad (RenderSetpointValuePartial()) das gesamte
@@ -288,14 +379,11 @@ void DisplayManager::RenderFrame()
 	if (mShowingSetpoint) {
 		DrawSetpointValueSplit(mLine1Text);
 	} else {
-		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kBigValueX, kBigValueY, mLine1Text,
-				 kBigValueScale, 1);
+		DrawBigNumberText(kBigValueX, kBigValueY, mLine1Text, kBigValueScale);
 		if (!mShowingMode) {
 			font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kUnitLabelX,
 					 kUnitLabelY - DEGREE_ICON_HEIGHT + 2, degree_icon_bitmap, DEGREE_ICON_WIDTH,
 					 DEGREE_ICON_HEIGHT);
-			font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kUnitLabelX + DEGREE_ICON_WIDTH,
-					 kUnitLabelY, "C", kUnitLabelScale, 1);
 		}
 	}
 
@@ -311,12 +399,12 @@ void DisplayManager::RenderFrame()
 	uint16_t humidityStartX = mShowingSetpoint ? kHumidityStartXSetpoint : kHumidityStartXNormal;
 	font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, humidityStartX, humidityIconY, droplet_icon_bitmap,
 			 DROPLET_ICON_WIDTH, DROPLET_ICON_HEIGHT);
-	font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, humidityStartX + DROPLET_ICON_WIDTH + 6,
-			 humidityIconY + 1, mLine2Text, kHumidityTextScale, 1);
-	if (!mShowingSetpoint) {
-		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kTextX, kBatteryTextY, mLine3Text,
-				 kBatteryTextScale, 1);
-	}
+	DrawBigNumberText(humidityStartX + DROPLET_ICON_WIDTH + 6, humidityIconY + 1, mLine2Text, kHumidityTextScale);
+
+	/* TODO: nur bei niedrigem Akkustand zeichnen (z.B. mLastBatteryPercent/2
+	 * <= 10) - erstmal unbedingt zum Ansehen, Bedingung kommt als naechstes. */
+	font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kBatteryLowIconX, kBatteryLowIconY,
+			 battery_low_icon_bitmap, BATTERY_LOW_ICON_WIDTH, BATTERY_LOW_ICON_HEIGHT);
 
 	/* Icon-Spalte rechts: WLAN-Icon ist dauerhaft sichtbar (Funkmodul ist
 	 * immer da, unabhaengig vom TRV-Bindungsstatus). Die Punkte darunter
@@ -572,10 +660,10 @@ void DisplayManager::RenderLine1Text()
 	if (mShowingMode) {
 		snprintf(mLine1Text, sizeof(mLine1Text), "%s", mLastModeIsHeating ? "HEATING" : "OFF");
 	} else if (mShowingSetpoint) {
-		snprintf(mLine1Text, sizeof(mLine1Text), "%d.%d", mLastSetpoint / 100,
+		snprintf(mLine1Text, sizeof(mLine1Text), "%d,%d", mLastSetpoint / 100,
 			 abs(mLastSetpoint % 100) / 10);
 	} else {
-		snprintf(mLine1Text, sizeof(mLine1Text), "%d.%d", mLastLocalTemp / 100,
+		snprintf(mLine1Text, sizeof(mLine1Text), "%d,%d", mLastLocalTemp / 100,
 			 abs(mLastLocalTemp % 100) / 10);
 	}
 }
@@ -630,16 +718,10 @@ void DisplayManager::RenderLine3Text()
 
 void DisplayManager::RenderLine3()
 {
-	RenderLine3Text();
-
-	/* Waehrend des Setpoint-Overlays ist die Batteriezeile ausgeblendet
-	 * (siehe RenderFrame()) - ein Partial-Update wuerde sie hier faelschlich
-	 * wieder reinzeichnen. */
-	if (mShowingSetpoint) {
-		return;
-	}
-
-	RenderLinePartial(2);
+	/* Batterieanzeige komplett entfernt (auf Nutzerwunsch) - mLastBatteryPercent
+	 * wird weiterhin in UpdateBattery() aktualisiert, aber nicht mehr
+	 * gezeichnet. RenderLine3Text()/RenderLinePartial(2) absichtlich nicht
+	 * mehr aufgerufen. */
 }
 
 void DisplayManager::RenderHeatingIconPartial()
@@ -820,14 +902,6 @@ void DisplayManager::RenderLinePartial(uint8_t lineIndex)
 		textCapacity = sizeof(mLine2Text);
 		scale = kHumidityTextScale;
 		break;
-	case 2:
-		lineX = kTextX;
-		lineY = kBatteryTextY;
-		text = mLine3Text;
-		prevText = mLine3TextPrev;
-		textCapacity = sizeof(mLine3Text);
-		scale = kBatteryTextScale;
-		break;
 	default:
 		return;
 	}
@@ -890,11 +964,11 @@ void DisplayManager::RenderTextPartial(char *text, char *prevText, size_t textCa
 	/* Zeichen-Diff: nur die Spalten der tatsaechlich geaenderten Zeichen
 	 * aktualisieren (z.B. nur die "4" bei "H:54%" -> "H:55%", oder nur die
 	 * "5" bei einer Setpoint-Aenderung von 21.5C -> 21.6C), statt der
-	 * ganzen Zeile. kGlyphWidth/kCharAdvance muessen zu font5x7.h/
-	 * font_draw_string()'s Formel passen ((FONT5X7_WIDTH+1)*scale). */
+	 * ganzen Zeile. Positionen ueber CharPositionX() (nicht i*CharAdvance())
+	 * berechnet, weil das Komma in der grossen Zahl einen kuerzeren Vorschub
+	 * hat - sonst verschieben sich Voll- und Partial-Render gegeneinander. */
 	constexpr uint16_t kGlyphWidth = 5;
-	uint16_t charAdvance = (kGlyphWidth + 1) * scale;
-	uint16_t glyphPixelWidth = kGlyphWidth * scale;
+	uint16_t glyphPixelWidth = kGlyphWidth * scale; /* Obergrenze, auch fuer das schmalere Komma unkritisch */
 
 	size_t newLen = strlen(text);
 	size_t prevLen = strlen(prevText);
@@ -928,8 +1002,8 @@ void DisplayManager::RenderTextPartial(char *text, char *prevText, size_t textCa
 		bandH = mPanelHeight - bandY;
 	}
 
-	uint16_t startPx = x + firstDiff * charAdvance;
-	uint16_t endPx = x + lastDiff * charAdvance + glyphPixelWidth - 1;
+	uint16_t startPx = CharPositionX(x, text, firstDiff, scale);
+	uint16_t endPx = CharPositionX(x, text, lastDiff, scale) + glyphPixelWidth - 1;
 
 	/* Horizontal auf 8px-Grenzen ausrichten - vom Treiber fuer Partial-
 	 * Refresh verlangt (siehe eink154_set_partial_window()). */
@@ -952,9 +1026,9 @@ void DisplayManager::RenderTextPartial(char *text, char *prevText, size_t textCa
 	}
 	for (size_t i = firstDiff; i <= lastDiff; i++) {
 		char c = (i < newLen) ? text[i] : ' ';
-		uint16_t charX = x + i * charAdvance;
+		uint16_t charX = CharPositionX(x, text, i, scale);
 
-		font_draw_char(mFramebuffer, mPanelWidth, mPanelHeight, charX, y, c, scale, 1);
+		DrawBigNumberChar(charX, y, c, scale);
 	}
 
 	strncpy(prevText, text, textCapacity - 1);
