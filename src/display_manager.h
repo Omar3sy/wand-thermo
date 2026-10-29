@@ -62,6 +62,17 @@ public:
 	}
 
 private:
+	/* Boot-Splash: zeigt kurz nach dem Reset/Boot nur das Sync-Icon zentriert
+	 * an (statt sofort die Normalansicht mit lauter Default-/Null-Werten),
+	 * bis der Timer ablaeuft - dann einmaliger Wechsel zur normalen Ansicht
+	 * per RenderFrame(). Rein zeitgesteuert (nicht an echte Sensor-/TRV-
+	 * Bereitschaft gekoppelt), haelt die Aenderung dadurch unabhaengig vom
+	 * Rest der Boot-Sequenz. */
+	static constexpr int32_t kBootSplashDurationMs = 1500;
+	static void BootSplashTimeoutHandler(struct k_work *work);
+	k_work_delayable mBootSplashTimeout;
+	bool mShowingBootSplash = true;
+
 	static void SetpointTimeoutHandler(struct k_work *work);
 	static void ModeTimeoutHandler(struct k_work *work);
 	static void SetpointRenderDebounceHandler(struct k_work *work);

@@ -10,12 +10,15 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "app/task_executor.h"
+
 #include <app-common/zap-generated/attributes/Accessors.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/logging/log.h>
 
 #include "font_render.h"
+#include "boot_sync_icon.h"
 #include "heating_icon.h"
 #include "heating_idle_icon.h"
 #include "link_icon.h"
@@ -39,7 +42,9 @@ constexpr uint16_t kTextX = 5;
  * versetzt) + Heizung. Grosser Zahlenwert darunter; im Setpoint-Overlay
  * sitzen die Pfeile NICHT mehr in dieser Reihe, sondern direkt unter dem
  * Wert, in derselben Spalte. Danach Luftfeuchte-Zeile, Batterie unten links. */
-constexpr uint16_t kIconRowY = 0; /* so weit oben wie moeglich, minimaler Panelrand */
+/* y=0 - ganz oben, genau parallel zum WLAN-Icon (auch im Leerlauf, nicht
+ * nur beim aktiven Heizen). */
+constexpr uint16_t kIconRowY = 10;
 constexpr uint16_t kIconRowGap = 4;
 constexpr uint16_t kIconRowWidth =
 	LINK_ICON_WIDTH + kIconRowGap + DOTS_ICON_WIDTH + kIconRowGap + HEATING_ICON_WIDTH;
@@ -50,9 +55,15 @@ constexpr uint16_t kLinkIconY = kIconRowY;
 /* Punkte/X auf gleicher Hoehe wie WLAN (nicht mehr vertikal zentriert) -
  * sitzt dadurch oben buendig genau neben dem WLAN-Icon. */
 constexpr uint16_t kDotsIconX = kIconRowStartX + LINK_ICON_WIDTH + kIconRowGap;
-constexpr uint16_t kDotsIconY = kIconRowY + (LINK_ICON_HEIGHT - DOTS_ICON_HEIGHT) / 2;
 constexpr uint16_t kHeatingIconX = kIconRowStartX + LINK_ICON_WIDTH + kIconRowGap + DOTS_ICON_WIDTH + kIconRowGap;
-constexpr uint16_t kHeatingIconY = kIconRowY;
+/* Beide Zustaende (Leerlauf/Aktiv) auf gleicher Hoehe wie WLAN - genau
+ * parallel, kein Hoehenunterschied mehr zwischen den beiden Heizungs-Icon-
+ * Varianten (frueher stieg das aktive Icon noch eine Zeile hoeher). */
+constexpr uint16_t kHeatingIconY = kIconRowY - 10;
+constexpr uint16_t kHeatingIconActiveY = kIconRowY - 10;
+/* Punkte/X auf gleicher Hoehe wie das aktive Heizungs-Icon, auf
+ * Nutzerwunsch. */
+constexpr uint16_t kDotsIconY = kHeatingIconActiveY + 12;
 /* Reihe ist jetzt immer gleich breit (keine Pfeile mehr darin) - bleibt in
  * beiden Modi an derselben Position, kein Springen beim Rein-/Rausgehen aus
  * dem Setpoint-Overlay. */
@@ -83,7 +94,7 @@ constexpr uint16_t kBigValueBottomY = 120;
  * RenderFrame()/RenderSetpointValuePartial() zeichnen das zusammen, siehe
  * dort. */
 constexpr uint16_t kSetpointIntDigits = 2;
-constexpr uint16_t kSetpointIntX = kTextX; /* ganz links, direkt am Panelrand */
+constexpr uint16_t kSetpointIntX = kTextX - 3; /* etwas naeher am Panelrand als kTextX */
 /* Fester Wert statt von kBigValueY abgeleitet - Aenderungen an der normalen
  * Temperatur-Position (kBigValueY) sollen die Setpoint-Overlay-Position
  * nicht automatisch mitverschieben (das hatte sonst via kSetpointArrowsIconY/
@@ -101,18 +112,18 @@ constexpr uint16_t kSetpointCScale = 2;
  * hochgestelltes Gradzeichen leicht angehoben (kSetpointDecY-6) statt
  * normal auf der Zeile - sieht dadurch aus wie "13.5°C" mit "C" als
  * angehobene Einheit direkt daneben, nicht weit oben abgesetzt. */
-constexpr uint16_t kSetpointArrowsIconX = 200 - SETPOINT_ARROWS_ICON_WIDTH - 5;
+constexpr uint16_t kSetpointArrowsIconX = 200 - SETPOINT_ARROWS_ICON_WIDTH - 2;
 constexpr uint16_t kSetpointArrowsIconY = kSetpointIntY;
 constexpr uint16_t kSetpointArrowsBottomY = kSetpointArrowsIconY + SETPOINT_ARROWS_ICON_HEIGHT;
 constexpr uint16_t kSetpointCX = kSetpointDecX + kSetpointDecWidth + 4;
 constexpr uint16_t kSetpointCY = kSetpointDecY - 6;
 
-/* Thermometer-im-Kreis-Icon, nur waehrend des Setpoint-Overlays - markiert,
- * dass der grosse Wert gerade der editierbare Sollwert ist (statt der
- * vorherigen Text-Beschriftung "Setpoint:"). Links oben, unabhaengig von der
- * (jetzt immer gleich breiten) Icon-Reihe positioniert. */
-constexpr uint16_t kThermIconX = kTextX;
-constexpr uint16_t kThermIconY = kIconRowY;
+/* Thermometer+"C"-Icon, nur waehrend des Setpoint-Overlays - markiert, dass
+ * der grosse Wert gerade der editierbare Sollwert ist. Sitzt direkt neben
+ * dem Wert (nach der Nachkommastelle, vor den Pfeilen), vertikal mittig zur
+ * Zahlenhoehe statt oben links in der Icon-Reihe. */
+constexpr uint16_t kThermIconX = kSetpointDecX + kSetpointDecWidth + 2;
+constexpr uint16_t kThermIconY = kSetpointIntY + (7 * kBigValueScale - THERM_C_ICON_HEIGHT) / 2;
 
 /* Luftfeuchte: Tropfen-Icon + Prozentzahl. Normalansicht nutzt jetzt
  * dieselbe Position wie das Setpoint-Overlay (frueher zwei unterschiedliche
@@ -180,16 +191,37 @@ CHIP_ERROR DisplayManager::Init()
 	k_work_init_delayable(&mSetpointRenderDebounce, DisplayManager::SetpointRenderDebounceHandler);
 	k_work_init_delayable(&mModeRenderDebounce, DisplayManager::ModeRenderDebounceHandler);
 
+	k_work_init_delayable(&mBootSplashTimeout, DisplayManager::BootSplashTimeoutHandler);
+	k_work_schedule(&mBootSplashTimeout, K_MSEC(kBootSplashDurationMs));
+
 	/* Erster Render immer als Full-Frame (zeichnet Logo + alle drei Zeilen
 	 * zusammen) - Partial-Refresh setzt voraus, dass der aktuelle
 	 * Panel-Inhalt bereits mit mFramebuffer uebereinstimmt, was beim
-	 * allerersten Aufbau noch nicht der Fall ist. */
+	 * allerersten Aufbau noch nicht der Fall ist. mShowingBootSplash ist zu
+	 * diesem Zeitpunkt noch true, RenderFrame() zeichnet daher zunaechst nur
+	 * den Boot-Splash statt der (noch lauter Default-/Null-Werte enthaltenden)
+	 * Normalansicht. */
 	RenderLine1Text();
 	RenderLine2Text();
 	RenderLine3Text();
 	RenderFrame();
 
 	return CHIP_NO_ERROR;
+}
+
+void DisplayManager::BootSplashTimeoutHandler(struct k_work *work)
+{
+	/* k_work laeuft auf der System-Workqueue, nicht auf dem CHIP/App-Thread,
+	 * der SPI-Bus und Framebuffer eigentlich besitzt (alle anderen
+	 * Display-Updates ueber Threads hinweg gehen deshalb durch
+	 * Nrf::PostTask(), siehe sensor.cpp) - ohne das blieb der Splash auf dem
+	 * Panel haengen, bis ein Tastendruck (der bereits auf dem App-Thread
+	 * laeuft) den naechsten Render erzwang. */
+	Nrf::PostTask([] {
+		DisplayManager &self = DisplayManager::Instance();
+		self.mShowingBootSplash = false;
+		self.RenderFrame();
+	});
 }
 
 void DisplayManager::DrawSetpointValueSplit(const char *text)
@@ -217,7 +249,13 @@ void DisplayManager::DrawSetpointValueSplit(const char *text)
 		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kSetpointDecX, kSetpointDecY, dot,
 				 kSetpointDecScale, 1);
 	}
-	font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kSetpointCX, kSetpointCY, "C", kSetpointCScale, 1);
+	/* Icon wird hier mitgezeichnet (statt nur einmal in RenderFrame), weil
+	 * der Partial-Update-Pfad (RenderSetpointValuePartial()) das gesamte
+	 * Wert-Rechteck inkl. dieses Bereichs bei jeder Aenderung loescht - ohne
+	 * das Icon hier erneut zu zeichnen wuerde es nach dem ersten
+	 * Tastendruck verschwinden. */
+	font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kThermIconX, kThermIconY, therm_c_icon_bitmap,
+			 THERM_C_ICON_WIDTH, THERM_C_ICON_HEIGHT);
 }
 
 void DisplayManager::RenderFrame()
@@ -228,6 +266,19 @@ void DisplayManager::RenderFrame()
 
 	memset(mFramebuffer, 0xFF, mFramebufferSize);
 
+	if (mShowingBootSplash) {
+		/* Waehrend des Boot-Splashs nur das Sync-Icon zentriert zeigen,
+		 * sonst nichts - vermeidet, kurz nach dem Reset die Normalansicht
+		 * mit lauter Default-/Null-Werten (0.0C, 0% Feuchte, X statt
+		 * Punkte) aufblitzen zu lassen, bevor echte Daten da sind. */
+		uint16_t iconX = (mPanelWidth - BOOT_SYNC_ICON_WIDTH) / 2;
+		uint16_t iconY = (mPanelHeight - BOOT_SYNC_ICON_HEIGHT) / 2;
+		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, iconX, iconY, boot_sync_icon_bitmap,
+				 BOOT_SYNC_ICON_WIDTH, BOOT_SYNC_ICON_HEIGHT);
+		WriteRotatedRegion(0, 0, mPanelWidth - 1, mPanelHeight - 1);
+		return;
+	}
+
 	/* Grosser Wert: Temperatur normal, "HEATING"/"OFF" waehrend des Mode-
 	 * Overlays - mLine1Text enthaelt bereits den richtigen Inhalt, siehe
 	 * RenderLine1Text(). Kleines "C" daneben, ausser bei "HEATING"/"OFF".
@@ -236,14 +287,15 @@ void DisplayManager::RenderFrame()
 	 * DrawSetpointValueSplit(). */
 	if (mShowingSetpoint) {
 		DrawSetpointValueSplit(mLine1Text);
-		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kThermIconX, kThermIconY,
-				 therm_circle_icon_bitmap, THERM_CIRCLE_ICON_WIDTH, THERM_CIRCLE_ICON_HEIGHT);
 	} else {
 		font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kBigValueX, kBigValueY, mLine1Text,
 				 kBigValueScale, 1);
 		if (!mShowingMode) {
-			font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kUnitLabelX, kUnitLabelY, "C",
-					 kUnitLabelScale, 1);
+			font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kUnitLabelX,
+					 kUnitLabelY - DEGREE_ICON_HEIGHT + 2, degree_icon_bitmap, DEGREE_ICON_WIDTH,
+					 DEGREE_ICON_HEIGHT);
+			font_draw_string(mFramebuffer, mPanelWidth, mPanelHeight, kUnitLabelX + DEGREE_ICON_WIDTH,
+					 kUnitLabelY, "C", kUnitLabelScale, 1);
 		}
 	}
 
@@ -285,20 +337,22 @@ void DisplayManager::RenderFrame()
 
 	/* Heizungs-Icon ist dauerhaft sichtbar, sobald der TRV gebunden ist
 	 * (nicht mehr nur waehrend aktivem Heizbedarf) - zeigt dabei eine von
-	 * zwei Varianten: Umriss (heating_idle_icon_bitmap) im Leerlauf, Icon
-	 * mit Dampf-Linien (heating_icon_bitmap) waehrend aktiv geheizt wird.
-	 * Ganz ausgeblendet nur, wenn der TRV offline/nicht gebunden ist (dann
-	 * gibt es keine verlaesslichen Heizdaten). */
+	 * zwei Varianten: Umriss ohne Dampf-Linien (heating_icon_bitmap) im
+	 * Leerlauf (nur erfolgreich gebunden), Icon MIT Dampf-Linien
+	 * (heating_idle_icon_bitmap) waehrend aktiv geheizt wird - die
+	 * Bitmap-Namen sind historisch vertauscht, die Zuordnung hier ist
+	 * massgeblich. Ganz ausgeblendet nur, wenn der TRV offline/nicht
+	 * gebunden ist (dann gibt es keine verlaesslichen Heizdaten). */
 	mHeatingIconActive = mSystemModeIsHeating && mLastHeatingDemand > 0;
 	mHeatingIconDrawnState = mTrvOffline	       ? HeatingIconState::kHidden
 				  : mHeatingIconActive ? HeatingIconState::kActive
 						       : HeatingIconState::kIdle;
 	if (mHeatingIconDrawnState == HeatingIconState::kActive) {
-		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kHeatingIconX, kHeatingIconY,
-				 heating_icon_bitmap, HEATING_ICON_WIDTH, HEATING_ICON_HEIGHT);
+		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kHeatingIconX, kHeatingIconActiveY,
+				 heating_idle_icon_bitmap, HEATING_IDLE_ICON_WIDTH, HEATING_IDLE_ICON_HEIGHT);
 	} else if (mHeatingIconDrawnState == HeatingIconState::kIdle) {
 		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kHeatingIconX, kHeatingIconY,
-				 heating_idle_icon_bitmap, HEATING_IDLE_ICON_WIDTH, HEATING_IDLE_ICON_HEIGHT);
+				 heating_icon_bitmap, HEATING_ICON_WIDTH, HEATING_ICON_HEIGHT);
 	}
 
 	if (mShowingSetpoint) {
@@ -615,15 +669,22 @@ void DisplayManager::RenderHeatingIconPartial()
 	size_t colByteStart = alignedStart / 8;
 	size_t colBytes = (width + 7) / 8;
 
-	for (uint16_t row = 0; row < HEATING_ICON_HEIGHT; row++) {
-		memset(&mFramebuffer[(kHeatingIconY + row) * bytesPerRow + colByteStart], 0xFF, colBytes);
+	/* Clear-Bereich muss beide moeglichen Y-Positionen abdecken
+	 * (kHeatingIconActiveY=0 bis kHeatingIconY+HEATING_ICON_HEIGHT), nicht
+	 * nur die aktuell gezeichnete - sonst bleiben beim Wechsel zwischen
+	 * Idle (y=kIconRowY) und Aktiv (y=0) Reste der jeweils anderen Position
+	 * stehen. */
+	constexpr uint16_t kClearY0 = kHeatingIconActiveY;
+	constexpr uint16_t kClearHeight = kHeatingIconY + HEATING_ICON_HEIGHT - kHeatingIconActiveY;
+	for (uint16_t row = 0; row < kClearHeight; row++) {
+		memset(&mFramebuffer[(kClearY0 + row) * bytesPerRow + colByteStart], 0xFF, colBytes);
 	}
 	if (wantState == HeatingIconState::kActive) {
-		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kHeatingIconX, kHeatingIconY,
-				 heating_icon_bitmap, HEATING_ICON_WIDTH, HEATING_ICON_HEIGHT);
+		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kHeatingIconX, kHeatingIconActiveY,
+				 heating_idle_icon_bitmap, HEATING_IDLE_ICON_WIDTH, HEATING_IDLE_ICON_HEIGHT);
 	} else if (wantState == HeatingIconState::kIdle) {
 		font_draw_bitmap(mFramebuffer, mPanelWidth, mPanelHeight, kHeatingIconX, kHeatingIconY,
-				 heating_idle_icon_bitmap, HEATING_IDLE_ICON_WIDTH, HEATING_IDLE_ICON_HEIGHT);
+				 heating_icon_bitmap, HEATING_ICON_WIDTH, HEATING_ICON_HEIGHT);
 	}
 
 	mPartialRefreshCount++;
@@ -633,7 +694,7 @@ void DisplayManager::RenderHeatingIconPartial()
 		return;
 	}
 
-	WriteRotatedRegion(alignedStart, kHeatingIconY, alignedEnd, kHeatingIconY + HEATING_ICON_HEIGHT - 1);
+	WriteRotatedRegion(alignedStart, kClearY0, alignedEnd, kClearY0 + kClearHeight - 1);
 }
 
 void DisplayManager::RenderLinkIconPartial()
@@ -789,7 +850,7 @@ void DisplayManager::RenderSetpointValuePartial()
 	}
 
 	constexpr uint16_t kClearX0 = kSetpointIntX & static_cast<uint16_t>(~0x07);
-	constexpr uint16_t kClearX1 = (kSetpointCX + 6 * kSetpointCScale + 7) | 0x07;
+	constexpr uint16_t kClearX1 = (kSetpointCX + DEGREE_ICON_WIDTH + 6 * kSetpointCScale + 7) | 0x07;
 	constexpr uint16_t kClearY0 = kSetpointIntY - 2;
 	constexpr uint16_t kClearY1 = kSetpointValueBottomY;
 
