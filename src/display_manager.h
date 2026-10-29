@@ -34,29 +34,31 @@ public:
 	void UpdateBattery(uint8_t percentHalfUnits);
 	void UpdateHeatingDemand(uint8_t percent);
 
-	/* Persistent (not temporary) System Mode state, reflected on line 2:
-	 * suppresses the heating-demand percentage while the mode is Off. */
+	/* Persistent (not temporary) System Mode state - suppresses the heating
+	 * icon while the mode is Off, even if PIHeatingDemand is still > 0. */
 	void SetSystemModeIsHeating(bool isHeating)
 	{
 		mSystemModeIsHeating = isHeating;
-		RenderLine2();
+		RenderHeatingIconPartial();
 	}
 
 	/* Called by the TRV poll failure/success tracking in sensor.cpp once
 	 * consecutive failures cross the threshold (or a poll succeeds again),
-	 * so the user sees "TRV offline" on the LCD instead of silently stale
+	 * so the user sees the crossed-out link icon instead of silently stale
 	 * setpoint/heating-demand values. */
 	void SetTrvOffline(bool offline)
 	{
 		mTrvOffline = offline;
-		RenderLine3();
+		RenderLinkIconPartial();
+		RenderHeatingIconPartial();
 	}
 
-	/* True while the TRV subscription is established, shown as a check mark on line 3. */
+	/* True while the TRV subscription is established, shown as the link icon
+	 * (plus the "binding confirmed" dots) instead of the crossed-out one. */
 	void SetTrvLinked(bool linked)
 	{
 		mTrvLinked = linked;
-		RenderLine3();
+		RenderLinkIconPartial();
 	}
 
 private:
@@ -93,7 +95,39 @@ private:
 	 * RenderSetpointValuePartial(): vergleicht text/prevText zeichenweise und
 	 * aktualisiert nur die Spalten der tatsaechlich geaenderten Zeichen per
 	 * Partial-Refresh. */
-	void RenderTextPartial(char *text, char *prevText, size_t textCapacity, uint16_t y, uint8_t scale);
+	void RenderTextPartial(char *text, char *prevText, size_t textCapacity, uint16_t x, uint16_t y, uint8_t scale);
+	/* Zeichnet den Setpoint-Wert in der abweichenden Setpoint-Overlay-
+	 * Darstellung: Ganzzahlteil gross, Nachkommateil (inkl. Punkt) kleiner
+	 * direkt danach, "C" oben rechts daneben - "text" ist im Format "%d.%d"
+	 * (siehe RenderLine1Text()). Zeichnet kein Clear und keine Pfeile (die
+	 * zeichnet der Aufrufer separat, siehe RenderFrame()). */
+	void DrawSetpointValueSplit(const char *text);
+
+	/* Das Panel sitzt 90 Grad gedreht im Gehaeuse (Querformat-Montage) -
+	 * Logo/Text/Icons werden weiterhin ganz normal "logisch" (Hochformat-
+	 * Koordinaten wie bisher) in mFramebuffer gezeichnet; erst beim
+	 * tatsaechlichen Schreiben ans Panel wird das benoetigte Rechteck um 90
+	 * Grad gedreht in mRotatedScratch aufgebaut und physisch geschrieben.
+	 * logX0/Y0/X1/Y1 sind inklusive, in logischen (ungedrehten) Koordinaten -
+	 * exakt dieselben Werte, die vorher direkt an display_write() gingen. */
+	void WriteRotatedRegion(uint16_t logX0, uint16_t logY0, uint16_t logX1, uint16_t logY1);
+	/* true = weiss, false = schwarz - liest ein einzelnes Pixel aus dem
+	 * logischen mFramebuffer (gleiche bit=0-schwarz/MSB-first-Konvention wie
+	 * font_render.c). */
+	bool LogicalPixelIsWhite(uint16_t lx, uint16_t ly) const;
+	/* Zeichnet/entfernt die Icons in der rechten Icon-Spalte per Partial-
+	 * Refresh, sobald sich der jeweilige Anzeige-Zustand (heizt gerade / TRV
+	 * verbunden/getrennt) tatsaechlich aendert - sonst No-Op. */
+	void RenderHeatingIconPartial();
+	void RenderLinkIconPartial();
+	/* "Bindung bestaetigt"-Punkte unter dem Link-Icon - wird von
+	 * RenderLinkIconPartial() mit aufgerufen (gleicher Sichtbarkeits-
+	 * Zustand wie das normale Link-Icon). */
+	void RenderDotsIconPartial();
+	/* Gemeinsame Zeichen-/Bitmap-Logik fuer beide Icons oben: zeichnet bzw.
+	 * loescht ein festes Rechteck per Partial-Refresh. */
+	void RenderIconPartial(const uint8_t *bitmap, uint16_t iconWidth, uint16_t iconHeight, uint16_t x, uint16_t y,
+				bool show, bool *shownState);
 
 	/* Bei kTextScale=4 passen max. ~8 Zeichen pro Zeile (200px Panelbreite)
 	 * - deshalb jetzt 3 kurze Zeilen statt 2 laengere. */
@@ -110,6 +144,12 @@ private:
 	char mLine3TextPrev[16] = "";
 	uint8_t *mFramebuffer = nullptr;
 	size_t mFramebufferSize = 0;
+	/* Scratch-Puffer fuer WriteRotatedRegion() - gleiche Groesse wie
+	 * mFramebuffer (volle Panelflaeche), da ein Full-Refresh das ganze
+	 * gedrehte Bild braucht; Partial-Refreshes nutzen nur den vorderen Teil
+	 * davon. Einmalig in Init() alloziert statt pro Aufruf, um Heap-
+	 * Fragmentierung/Laufzeitkosten auf dem App-Thread zu vermeiden. */
+	uint8_t *mRotatedScratch = nullptr;
 	uint16_t mPanelWidth = 0;
 	uint16_t mPanelHeight = 0;
 
@@ -153,6 +193,23 @@ private:
 	bool mSystemModeIsHeating = true;
 	bool mTrvOffline = false;
 	bool mTrvLinked = false;
+
+	/* Zuletzt tatsaechlich aufs Panel gezeichneter Icon-Zustand - verhindert
+	 * unnoetige Partial-Refreshes, wenn sich der gewuenschte Zustand nicht
+	 * geaendert hat (analog zu mLineXTextPrev). Heizungs-Icon hat drei
+	 * moegliche Zustaende statt nur an/aus: versteckt (TRV offline),
+	 * Umriss (gebunden, Leerlauf), aktiv (gebunden, heizt gerade). */
+	enum class HeatingIconState : uint8_t { kHidden, kIdle, kActive };
+	HeatingIconState mHeatingIconDrawnState = HeatingIconState::kHidden;
+	/* true = mLastHeatingDemand>0 && Systemmodus heizt - unabhaengig von
+	 * mTrvOffline, da RenderFrame()/RenderHeatingIconPartial() das Icon bei
+	 * Offline ganz ausblenden, aber den "waere aktiv"-Zustand trotzdem
+	 * nachhalten (fuer den Moment, in dem der TRV wieder online geht). */
+	bool mHeatingIconActive = false;
+	/* true = Punkte ("Bindung bestaetigt") sind aktuell gezeichnet, false =
+	 * X ("keine Bindung") - das WLAN-Icon selbst ist immer sichtbar und
+	 * braucht daher keinen eigenen Sichtbarkeits-Zustand. */
+	bool mDotsBoundShown = false;
 
 	/* Sicherheitsnetz gegen Ghosting/Image-Retention bei wiederholtem
 	 * Partial-Refresh - Microtechs eigene Empfehlung (Monica, 2026-10-19):

@@ -183,11 +183,36 @@ TemperatureSensor::TemperatureSensor()
 
 	k_work_init_delayable(&mEarlySubscribeKick, TemperatureSensor::EarlySubscribeKickHandler);
 	k_work_schedule(&mEarlySubscribeKick, K_MINUTES(3));
+
+	mFastDiscoveryAttempts = 0;
+	k_work_init_delayable(&mFastDiscoveryRetry, TemperatureSensor::FastDiscoveryRetryHandler);
+	k_work_schedule(&mFastDiscoveryRetry, K_MSEC(kFastDiscoveryIntervalMs));
 }
 
 void TemperatureSensor::EarlySubscribeKickHandler(struct k_work *work)
 {
 	TemperatureSensor::Instance().EnsureTrvSubscribed();
+}
+
+void TemperatureSensor::FastDiscoveryRetryHandler(struct k_work *work)
+{
+	TemperatureSensor &self = TemperatureSensor::Instance();
+
+	if (sTrvSubscribed || self.mFastDiscoveryAttempts >= kFastDiscoveryMaxAttempts) {
+		/* Ziel erreicht (abonniert) oder genug erfolglose Versuche - der
+		 * normale 5-Minuten-Zyklus in FullMeasurement() laeuft unabhaengig
+		 * davon unbegrenzt weiter, daher kein Verlust falls der TRV erst
+		 * spaeter erreichbar wird. */
+		return;
+	}
+	self.mFastDiscoveryAttempts++;
+
+	self.PollTrvSetpoint();
+	self.PollTrvHeatingDemand();
+	self.PollTrvLocalTemperature();
+	self.EnsureTrvSubscribed();
+
+	k_work_reschedule(&self.mFastDiscoveryRetry, K_MSEC(kFastDiscoveryIntervalMs));
 }
 
 void TemperatureSensor::FullMeasurement()
@@ -784,8 +809,12 @@ chip::NodeId TemperatureSensor::sTrvSubscribedNodeId = chip::kUndefinedNodeId;
 
 namespace
 {
-/* 1 s minimum: the TRV may report on every change, but not faster than this. */
-constexpr uint16_t kTrvSubscriptionMinIntervalSeconds = 1;
+/* 5 s minimum: the TRV may report on every change, but not faster than this.
+ * Raised from 1s - PIHeatingDemand changes almost continuously during active
+ * PI control, and each report wakes the ICD radio into fast-poll mode
+ * (200ms) for kChipIcdActiveModeDuration, roughly doubling average current
+ * draw when bound to a TRV vs. just a hub. */
+constexpr uint16_t kTrvSubscriptionMinIntervalSeconds = 5;
 /* 120 s, not 300 s: the TRV expects an external temperature update at least
  * every 150 s, so a report must arrive within that window. */
 constexpr uint16_t kTrvSubscriptionMaxIntervalSeconds = 120;

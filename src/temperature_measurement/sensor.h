@@ -128,4 +128,18 @@ private:
 	 * FullMeasurement() (bei Boot) genug Zeit, die Node-ID zu liefern. */
 	static void EarlySubscribeKickHandler(struct k_work *work);
 	k_work_delayable mEarlySubscribeKick;
+
+	/* Schnelle Wiederholung direkt nach Boot/Binding: pollt den TRV alle 15s
+	 * (statt im normalen 5-Minuten-Zyklus zu warten), bis sPrimaryTrvNodeId
+	 * bekannt UND die Subscription etabliert ist - Icons (WLAN-Punkte,
+	 * Heizung) erscheinen so innerhalb von Sekunden statt erst nach bis zu
+	 * 5-8 Minuten. Stoppt sich selbst, sobald subscribed, oder nach
+	 * kFastDiscoveryMaxAttempts Versuchen (TRV vermutlich nicht erreichbar -
+	 * der normale 5-Minuten-Zyklus laeuft unabhaengig davon unbegrenzt
+	 * weiter). */
+	static constexpr int32_t kFastDiscoveryIntervalMs = 15000;
+	static constexpr uint8_t kFastDiscoveryMaxAttempts = 20; /* ~5 Minuten */
+	static void FastDiscoveryRetryHandler(struct k_work *work);
+	k_work_delayable mFastDiscoveryRetry;
+	uint8_t mFastDiscoveryAttempts;
 };
