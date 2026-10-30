@@ -58,6 +58,19 @@ constexpr int16_t kSetpointEchoToleranceCentidegrees = 25;
  * radiator body) dominating the compensated setpoint sent to the TRV. */
 constexpr int16_t kMaxTrvOffsetMagnitude = 500; /* +/- 5.0 C */
 
+/* Exponentiell geglaettete Temperatur statt des rohen Einzelmesswerts -
+ * daempft das Messrauschen/die Streuung des SCD41 zwischen aufeinander-
+ * folgenden Messzyklen, ohne zusaetzliche Messzeit/Stromverbrauch zu kosten
+ * (reiner Software-Filter ueber die ohnehin stattfindenden Messzyklen).
+ * 30% Gewicht fuer den neuen Messwert ist ein ueblicher Kompromiss zwischen
+ * Traegheit (bei 100% waere es der rohe Wert, keine Glaettung) und
+ * Reaktionszeit auf echte Temperaturaenderungen (bei zu kleinem Gewicht
+ * haengt die Anzeige spuerbar hinterher). Integer-Fixpunkt (Prozent) statt
+ * Float, passend zum Rest dieser Datei. */
+constexpr int32_t kTempSmoothingNewWeightPercent = 30;
+bool sHasSmoothedTempMilliC = false;
+int32_t sSmoothedTempMilliC = 0;
+
 /* After this many consecutive failed TRV polls (across setpoint/heating-demand/
  * local-temperature reads), the TRV is considered unreachable and the display
  * shows "TRV offline" instead of silently keeping stale values. Reset to 0 on
@@ -303,12 +316,25 @@ void TemperatureSensor::Scd41ThreadEntry(void *, void *, void *)
 	}
 
 	if (ret == 0) {
+		/* Rohwert exponentiell glaetten, bevor er weiterverwendet wird -
+		 * daempft Messrauschen zwischen Zyklen. Beim allerersten gueltigen
+		 * Messwert (noch kein Vorgaengerwert) direkt uebernehmen statt
+		 * gegen 0 zu glaetten. */
+		if (!sHasSmoothedTempMilliC) {
+			sSmoothedTempMilliC = temp_millideg_c;
+			sHasSmoothedTempMilliC = true;
+		} else {
+			sSmoothedTempMilliC = sSmoothedTempMilliC +
+					      (temp_millideg_c - sSmoothedTempMilliC) * kTempSmoothingNewWeightPercent / 100;
+		}
+
 		/* Matter LocalTemperature is in units of 0.01 degC */
-		matterTemp = static_cast<int16_t>(temp_millideg_c / 10);
+		matterTemp = static_cast<int16_t>(sSmoothedTempMilliC / 10);
 		/* Matter RelativeHumidityMeasurement MeasuredValue is in units of 0.01 % */
 		matterHumidity = static_cast<uint16_t>(humidity_milli_percent / 10);
 		valid = true;
-		LOG_INF("SCD41: CO2=%u ppm, Temp=%d.%02u degC, RH=%u.%02u%%", co2,
+		LOG_INF("SCD41: CO2=%u ppm, Temp=%d.%02u degC (raw %d.%02u), RH=%u.%02u%%", co2,
+			(int)(sSmoothedTempMilliC / 1000), (unsigned)(labs(sSmoothedTempMilliC) % 1000) / 10,
 			(int)(temp_millideg_c / 1000), (unsigned)(abs(temp_millideg_c) % 1000) / 10,
 			humidity_milli_percent / 1000, (humidity_milli_percent % 1000) / 10);
 	} else {
